@@ -16,10 +16,15 @@
 #include <graphene/protocol/block.hpp>
 #include <graphene/protocol/transaction.hpp>
 #include <graphene/protocol/account.hpp>
+#include <graphene/protocol/witness.hpp>
 #include <graphene/chain/block_database.hpp>
 
 #include <fc/io/raw.hpp>
 #include <fc/filesystem.hpp>
+
+#include <fstream>
+#include <cstring>
+#include <algorithm>
 
 using namespace graphene::protocol;
 
@@ -352,6 +357,199 @@ BOOST_AUTO_TEST_CASE( stored_blocks_are_readable_under_the_other_format )
    }
 
    bdb.close();
+}
+
+/**
+ * A new field must never be appended to the reflected wire format of an operation that
+ * already exists on chain.
+ *
+ * The post-quantum signing keys were added straight into FC_REFLECT for these two
+ * operations, and FC_REFLECT's field order is the wire order, so every serialized
+ * witness_create/witness_update grew an optional that historical blocks do not contain.
+ * Reading one back went looking for the missing field, consumed a byte from whatever
+ * followed, and the transaction's `extensions` field -- next along -- failed on a nonsense
+ * variant tag. That breaks replay of the existing chain with no hardfork involved: a node
+ * could not sync mainnet from genesis.
+ *
+ * Under the legacy format these operations must therefore pack to exactly what a pre-PQ
+ * node produces, which is what this pins.
+ */
+BOOST_AUTO_TEST_CASE( witness_ops_keep_their_legacy_wire_format )
+{
+   witness_create_operation create;
+   create.witness_account = account_id_type( 1 );
+   create.url = "x";
+   create.block_signing_key = public_key_type();
+   create.block_pq_signing_key = pq_public_key_type();   // set, and still must not be emitted
+
+   witness_update_operation update;
+   update.witness = witness_id_type( 1 );
+   update.witness_account = account_id_type( 1 );
+   update.new_signing_key = public_key_type();
+   update.new_pq_signing_key = pq_public_key_type();
+
+   // Legacy bytes must be the concatenation of the pre-PQ fields and nothing else.
+   {
+      fc::raw::scoped_pq_format fmt( fc::raw::pq_format::legacy );
+
+      std::vector<char> expected;
+      auto append = [&expected]( const std::vector<char>& v )
+         { expected.insert( expected.end(), v.begin(), v.end() ); };
+      append( fc::raw::pack( create.fee ) );
+      append( fc::raw::pack( create.witness_account ) );
+      append( fc::raw::pack( create.url ) );
+      append( fc::raw::pack( create.block_signing_key ) );
+      BOOST_CHECK( fc::raw::pack( create ) == expected );
+
+      expected.clear();
+      append( fc::raw::pack( update.fee ) );
+      append( fc::raw::pack( update.witness ) );
+      append( fc::raw::pack( update.witness_account ) );
+      append( fc::raw::pack( update.new_url ) );
+      append( fc::raw::pack( update.new_signing_key ) );
+      BOOST_CHECK( fc::raw::pack( update ) == expected );
+   }
+
+   // The post-quantum format carries the extra field, so the two encodings differ, and each
+   // round-trips under its own format.
+   {
+      std::vector<char> legacy_bytes, current_bytes;
+      {
+         fc::raw::scoped_pq_format fmt( fc::raw::pq_format::legacy );
+         legacy_bytes = fc::raw::pack( create );
+         auto back = fc::raw::unpack<witness_create_operation>( legacy_bytes );
+         BOOST_CHECK( !back.block_pq_signing_key.valid() );
+      }
+      {
+         fc::raw::scoped_pq_format fmt( fc::raw::pq_format::current );
+         current_bytes = fc::raw::pack( create );
+         auto back = fc::raw::unpack<witness_create_operation>( current_bytes );
+         BOOST_CHECK( back.block_pq_signing_key.valid() );
+      }
+      BOOST_CHECK_LT( legacy_bytes.size(), current_bytes.size() );
+   }
+}
+
+/**
+ * Replay real mainnet blocks through the patched serialization code.
+ *
+ * Everything else in this review was verified against synthetic chains built from a fresh
+ * genesis. This case answers the question those cannot: does the patched code still read
+ * blocks that a pre-PQ node wrote years ago, and does it derive the same ids for them?
+ *
+ * The check is decisive because the ids are not ours to choose. Each block's id was computed
+ * by upstream code when the block was written and stored alongside it, and each block header
+ * carries the merkle root its producer computed. If any of the caching or format changes in
+ * this review altered how a legacy block hashes, the recomputed values would diverge from the
+ * recorded ones.
+ *
+ * Point BITSHARES_MAINNET_BLOCK_LOG at a block_num_to_block directory to run it; the case is
+ * skipped when unset, so it stays inert in CI. The log is opened strictly read-only and with
+ * plain ifstreams rather than through block_database, whose open() is read-write and whose
+ * index check truncates the file when a block fails to decode -- not something to aim at a
+ * real chain.
+ */
+BOOST_AUTO_TEST_CASE( mainnet_block_log_replay )
+{
+   const char* log_dir = getenv( "BITSHARES_MAINNET_BLOCK_LOG" );
+   if( !log_dir )
+   {
+      BOOST_TEST_MESSAGE( "skipping: set BITSHARES_MAINNET_BLOCK_LOG to a block_num_to_block dir" );
+      return;
+   }
+
+   const std::string index_path = std::string( log_dir ) + "/index";
+   const std::string blocks_path = std::string( log_dir ) + "/blocks";
+   std::ifstream index_file( index_path, std::ios::binary );
+   std::ifstream blocks_file( blocks_path, std::ios::binary );
+   BOOST_REQUIRE_MESSAGE( index_file.is_open() && blocks_file.is_open(),
+                          "cannot open block log at " + std::string( log_dir ) );
+
+   // index_entry is block_pos (8, LE), block_size (4, LE), block_id (20).
+   constexpr size_t entry_size = 32;
+   index_file.seekg( 0, std::ios::end );
+   const uint64_t entries = static_cast<uint64_t>( index_file.tellg() ) / entry_size;
+   BOOST_REQUIRE_GT( entries, 1000u );
+   const uint64_t head = entries - 1;
+   BOOST_TEST_MESSAGE( "block log head is " << head );
+
+   // Mainnet predates the hardfork, so its blocks are in the legacy format throughout.
+   fc::raw::scoped_pq_format fmt( fc::raw::pq_format::legacy );
+
+   size_t checked = 0, with_trx = 0, id_mismatch = 0, merkle_mismatch = 0, unreadable = 0;
+   uint64_t first_bad = 0;
+   std::string first_bad_reason;
+
+   auto check_block = [&]( uint64_t num )
+   {
+      char raw_entry[entry_size];
+      index_file.seekg( static_cast<std::streamoff>( entry_size * num ) );
+      index_file.read( raw_entry, entry_size );
+      if( index_file.gcount() != entry_size ) return;
+
+      uint64_t pos = 0; uint32_t size = 0;
+      memcpy( &pos, raw_entry, 8 );
+      memcpy( &size, raw_entry + 8, 4 );
+      if( size == 0 ) return;                       // hole in the log, not a failure
+
+      block_id_type stored_id;
+      memcpy( stored_id._hash, raw_entry + 12, sizeof( stored_id._hash ) );
+
+      std::vector<char> data( size );
+      blocks_file.seekg( static_cast<std::streamoff>( pos ) );
+      blocks_file.read( data.data(), size );
+      if( blocks_file.gcount() != static_cast<std::streamsize>( size ) ) { blocks_file.clear(); return; }
+
+      signed_block block;
+      try
+      {
+         block = fc::raw::unpack<signed_block>( data );
+      }
+      catch( const fc::exception& e )
+      {
+         if( !unreadable++ ) { first_bad = num; first_bad_reason = e.to_string(); }
+         return;
+      }
+      catch( const std::exception& e )
+      {
+         if( !unreadable++ ) { first_bad = num; first_bad_reason = e.what(); }
+         return;
+      }
+
+      ++checked;
+      if( block.id() != stored_id )
+      {
+         if( !id_mismatch++ ) first_bad = num;
+      }
+      if( !block.transactions.empty() )
+      {
+         ++with_trx;
+         if( block.calculate_merkle_root() != block.transaction_merkle_root )
+         {
+            if( !merkle_mismatch++ ) first_bad = num;
+         }
+      }
+   };
+
+   // Spread across the whole chain, then densely over three windows so that busy periods with
+   // many transactions per block are covered rather than only the sparse early history.
+   const uint64_t stride = std::max<uint64_t>( 1, head / 20000 );
+   for( uint64_t n = 1; n <= head; n += stride )
+      check_block( n );
+   for( uint64_t base : { head / 4, head / 2, head - 5000 } )
+      for( uint64_t n = base; n < base + 5000 && n <= head; ++n )
+         check_block( n );
+
+   BOOST_TEST_MESSAGE( "checked " << checked << " real blocks, " << with_trx << " with transactions" );
+   BOOST_CHECK_MESSAGE( unreadable == 0,
+                        unreadable << " blocks failed to decode, first at " << first_bad
+                                     << ": " << first_bad_reason );
+   BOOST_CHECK_MESSAGE( id_mismatch == 0,
+                        id_mismatch << " block ids differ from what upstream recorded, first at " << first_bad );
+   BOOST_CHECK_MESSAGE( merkle_mismatch == 0,
+                        merkle_mismatch << " merkle roots differ from the block header, first at " << first_bad );
+   BOOST_CHECK_GT( checked, 20000u );
+   BOOST_CHECK_GT( with_trx, 1000u );
 }
 
 BOOST_AUTO_TEST_SUITE_END()
