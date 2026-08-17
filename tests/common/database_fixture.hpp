@@ -242,7 +242,8 @@ struct database_fixture_base {
    void vote_for_committee_and_witnesses(uint16_t num_committee, uint16_t num_witness);
    signed_block generate_block(uint32_t skip = ~0,
                                const fc::ecc::private_key& key = generate_private_key("null_key"),
-                               int miss_blocks = 0);
+                               int miss_blocks = 0,
+                               const fc::optional<fc::pq_private_key>& pq_key = fc::optional<fc::pq_private_key>());
 
    /**
     * @brief Generates block_count blocks
@@ -463,6 +464,11 @@ struct database_fixture_base {
    const liquidity_pool_object& create_liquidity_pool( account_id_type account, asset_id_type asset_a,
                                                   asset_id_type asset_b, asset_id_type share_asset,
                                                   uint16_t taker_fee_percent, uint16_t withdrawal_fee_percent );
+   // Creates a StableSwap pool with the given amplification coefficient
+   const liquidity_pool_object& create_stable_liquidity_pool( account_id_type account, asset_id_type asset_a,
+                                                  asset_id_type asset_b, asset_id_type share_asset,
+                                                  uint16_t taker_fee_percent, uint16_t withdrawal_fee_percent,
+                                                  uint64_t amplification );
    liquidity_pool_delete_operation make_liquidity_pool_delete_op( account_id_type account,
                                                   liquidity_pool_id_type pool )const;
    generic_operation_result delete_liquidity_pool( account_id_type account, liquidity_pool_id_type pool );

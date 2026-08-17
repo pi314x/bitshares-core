@@ -585,13 +585,15 @@ namespace graphene { namespace chain {
             const fc::time_point_sec when,
             witness_id_type witness_id,
             const fc::ecc::private_key& block_signing_private_key,
-            uint32_t skip
+            uint32_t skip,
+            const fc::optional<fc::pq_private_key>& block_pq_signing_private_key = fc::optional<fc::pq_private_key>()
             );
       private:
          signed_block _generate_block(
             const fc::time_point_sec when,
             witness_id_type witness_id,
-            const fc::ecc::private_key& block_signing_private_key
+            const fc::ecc::private_key& block_signing_private_key,
+            const fc::optional<fc::pq_private_key>& block_pq_signing_private_key = fc::optional<fc::pq_private_key>()
             );
 
       public:
@@ -684,7 +686,8 @@ namespace graphene { namespace chain {
          fc::future<void> precompute_parallel( const precomputable_transaction& trx )const;
       private:
          template<typename Trx>
-         void _precompute_parallel( const Trx* trx, const size_t count, const uint32_t skip )const;
+         void _precompute_parallel( const Trx* trx, const size_t count, const uint32_t skip,
+                                     fc::raw::pq_format fmt )const;
 
       protected:
          // Mark pop_undo() as protected -- we do not want outside calling pop_undo(),

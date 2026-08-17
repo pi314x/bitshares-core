@@ -215,6 +215,11 @@ class serialize_member_visitor
       {
          std::cout << "    " << name <<": " << js_name<Member>::name() <<",\n";
       }
+
+      void operator()( const char* name, int64_t )const
+      {
+         std::cout << "    " << name <<": \"int64\",\n";
+      }
 };
 
 template<typename T>
@@ -336,6 +341,11 @@ class register_member_visitor
       {
          serializer<Member>::init();
       }
+
+      // FC_REFLECT_ENUM visits each enum value with (name, int64_t value)
+      void operator()( const char* name, int64_t )const
+      {
+      }
 };
 
 template<typename T, bool reflected>
@@ -347,7 +357,8 @@ struct serializer
       auto name = js_name<T>::name();
       if( st.find(name) == st.end() )
       {
-         fc::reflector<T>::visit( register_member_visitor() );
+         register_member_visitor vtor;
+         fc::reflector<T>::visit( vtor );
          register_serializer( name, [=](){ generate(); } );
       }
    }
@@ -359,7 +370,8 @@ struct serializer
       std::cout << "export const " << name
                 << " = new Serializer("
                 << "\"" + name + "\", {\n";
-      fc::reflector<T>::visit( serialize_member_visitor() );
+      serialize_member_visitor vtor2;
+      fc::reflector<T>::visit( vtor2 );
       std::cout <<"});\n\n";
    }
 };

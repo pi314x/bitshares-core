@@ -535,6 +535,17 @@ class wallet_api
        */
       map<public_key_type, string> dump_private_keys()const;
 
+      /** Dumps all post-quantum private keys owned by the wallet.
+       *
+       * The keys are printed in base58 format. You can import these keys into another
+       * wallet using \c import_pq_key(). Without this, a PQ key created by
+       * \c generate_pq_key() or \c migrate_wallet() exists only inside this wallet file
+       * and cannot be backed up or moved -- which for an account that has migrated to a
+       * PQ-only authority means losing the wallet file loses the account.
+       * @returns a map containing the private keys, indexed by their public key
+       */
+      map<pq_public_key_type, string> dump_pq_private_keys()const;
+
       /** Returns a list of all commands supported by the wallet API.
        *
        * This lists each command, along with its arguments and return types.
@@ -644,6 +655,40 @@ class wallet_api
        * @returns true if the key was imported
        */
       bool import_key( const string& account_name_or_id, const string& wif_key )const;
+
+      /** Imports a post-quantum private key (FIPS 204 ML-DSA) in base58 form
+       *  into the wallet.
+       *
+       * @param account_name_or_id the account owning the key
+       * @param base58_key the PQ private key in base58 form
+       * @returns true if the key was imported
+       */
+      bool import_pq_key( const string& account_name_or_id, const string& base58_key )const;
+
+      /** Deterministically derives a post-quantum key pair from the given
+       *  account's existing (legacy) key, stores the PQ private key in the
+       *  wallet, and returns the PQ public key string (Approach A migration).
+       *
+       * @param account_name_or_id the account owning the key
+       * @param owner_or_active_key_string a WIF or public key string; may be
+       *        left empty when the account has exactly one key in this wallet
+       * @param algorithm optional pq_algorithm tag (default: ML-DSA-65)
+       * @returns the post-quantum public key string
+       */
+      string generate_pq_key( const string& account_name_or_id,
+                             const string& owner_or_active_key_string = string(),
+                             const optional<uint8_t>& algorithm = optional<uint8_t>() )const;
+
+      /** Builds a transaction that adds post-quantum (FIPS 204 ML-DSA) keys to
+       *  the account's owner/active authorities (hybrid migration), keeping the
+       *  legacy keys intact. The PQ keys are derived deterministically from the
+       *  account's existing keys.
+       *
+       * @param account_name_or_id the account to migrate
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction migrate_wallet( const string& account_name_or_id, bool broadcast )const;
 
       /** Imports accounts from a BitShares 0.x wallet file.
        * Current wallet file must be unlocked to perform the import.
@@ -1418,11 +1463,17 @@ class wallet_api
        * @param url a URL to include in the witness record in the blockchain.  Clients may
        *            display this when showing a list of witnesses.  May be blank.
        * @param broadcast true to broadcast the transaction on the network
+       * @param block_pq_signing_key optional post-quantum (ML-DSA) block signing key, in
+       *            base58. When set, the witness must sign its blocks with the matching PQ
+       *            private key, supplied to the node via --pq-private-key. Requires the
+       *            PQ_0 hardfork to be active. The empty string leaves the witness on
+       *            classical block signing.
        * @returns the signed transaction registering a witness
        */
       signed_transaction create_witness( const string& owner_account,
                                          const string& url,
-                                         bool broadcast = false )const;
+                                         bool broadcast = false,
+                                         const string& block_pq_signing_key = "" )const;
 
       /**
        * Update a witness object owned by the given account.
@@ -1437,7 +1488,8 @@ class wallet_api
       signed_transaction update_witness( const string& witness_name,
                                          const string& url,
                                          const string& block_signing_key,
-                                         bool broadcast = false )const;
+                                         bool broadcast = false,
+                                         const string& block_pq_signing_key = "" )const;
 
 
       /**
@@ -1849,6 +1901,7 @@ FC_API( graphene::wallet::wallet_api,
         (is_locked)
         (lock)(unlock)(set_password)
         (dump_private_keys)
+        (dump_pq_private_keys)
         (list_my_accounts)
         (list_accounts)
         (list_account_balances)
@@ -1938,6 +1991,9 @@ FC_API( graphene::wallet::wallet_api,
         (get_transaction_signers)
         (get_key_references)
         (get_prototype_operation)
+        (generate_pq_key)
+        (import_pq_key)
+        (migrate_wallet)
         (propose_parameter_change)
         (propose_fee_change)
         (approve_proposal)
