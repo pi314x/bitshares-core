@@ -1463,19 +1463,39 @@ BOOST_AUTO_TEST_CASE( get_transaction_hex )
    trx.operations.push_back(make_account("testaccount", test_public));
    trx.validate();
 
+   // Post-quantum: pq_signatures are part of a packed transaction only under the current
+   // format. Before the PQ hardfork a transaction packs without them, so appending them
+   // unconditionally makes this comparison one byte too long -- fc::raw::pack() on the
+   // vector itself is not format-aware and still emits its length. Follow the ambient
+   // format, which is the whole point of the dual-format design.
+   auto expected_sig_hex = [&]() {
+      std::string hex = fc::to_hex( fc::raw::pack( trx.signatures ) );
+      if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
+         hex += fc::to_hex( fc::raw::pack( trx.pq_signatures ) );
+      return hex;
+   };
+
    // case1: not signed, get hex
    std::string hex_str = fc::to_hex( fc::raw::pack( trx ) );
 
    BOOST_CHECK( db_api.get_transaction_hex( trx ) == hex_str );
-   BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) + "00" == hex_str );
+   BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) + expected_sig_hex() == hex_str );
 
    // case2: signed, get hex
    sign( trx, test_private_key );
    hex_str = fc::to_hex( fc::raw::pack( trx ) );
 
    BOOST_CHECK( db_api.get_transaction_hex( trx ) == hex_str );
-   BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) +
-                   fc::to_hex( fc::raw::pack( trx.signatures ) ) == hex_str );
+   BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) + expected_sig_hex() == hex_str );
+
+   // Same identity must hold under the post-hardfork format, which is what the branch's
+   // version of this test assumed unconditionally.
+   {
+      fc::raw::scoped_pq_format fmt( fc::raw::pq_format::current );
+      std::string pq_hex_str = fc::to_hex( fc::raw::pack( trx ) );
+      BOOST_CHECK( db_api.get_transaction_hex( trx ) == pq_hex_str );
+      BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) + expected_sig_hex() == pq_hex_str );
+   }
 
 } FC_LOG_AND_RETHROW() }
 
