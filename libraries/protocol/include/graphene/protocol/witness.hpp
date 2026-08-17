@@ -43,6 +43,8 @@ namespace graphene { namespace protocol {
       account_id_type   witness_account;
       string            url;
       public_key_type   block_signing_key;
+      /// optional post-quantum (NIST FIPS 204 ML-DSA) block signing key
+      optional< pq_public_key_type > block_pq_signing_key;
 
       account_id_type fee_payer()const { return witness_account; }
       void            validate()const;
@@ -68,6 +70,8 @@ namespace graphene { namespace protocol {
       optional< string > new_url;
       /// The new block signing key.
       optional< public_key_type > new_signing_key;
+      /// The new post-quantum (NIST FIPS 204 ML-DSA) block signing key.
+      optional< pq_public_key_type > new_pq_signing_key;
 
       account_id_type fee_payer()const { return witness_account; }
       void            validate()const;
@@ -78,10 +82,10 @@ namespace graphene { namespace protocol {
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::witness_create_operation::fee_params_t, (fee) )
-FC_REFLECT( graphene::protocol::witness_create_operation, (fee)(witness_account)(url)(block_signing_key) )
+FC_REFLECT( graphene::protocol::witness_create_operation, (fee)(witness_account)(url)(block_signing_key)(block_pq_signing_key) )
 
 FC_REFLECT( graphene::protocol::witness_update_operation::fee_params_t, (fee) )
-FC_REFLECT( graphene::protocol::witness_update_operation, (fee)(witness)(witness_account)(new_url)(new_signing_key) )
+FC_REFLECT( graphene::protocol::witness_update_operation, (fee)(witness)(witness_account)(new_url)(new_signing_key)(new_pq_signing_key) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::witness_create_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::witness_update_operation::fee_params_t )

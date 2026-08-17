@@ -703,13 +703,14 @@ void database_fixture_base::verify_asset_supplies( const database& db )
 //   wlog("***  End  asset supply verification ***");
 }
 
-signed_block database_fixture_base::generate_block(uint32_t skip, const fc::ecc::private_key& key, int miss_blocks)
+signed_block database_fixture_base::generate_block(uint32_t skip, const fc::ecc::private_key& key, int miss_blocks,
+                                                    const fc::optional<fc::pq_private_key>& pq_key)
 {
    skip |= database::skip_undo_history_check;
    // skip == ~0 will skip checks specified in database::validation_steps
    auto block = db.generate_block(db.get_slot_time(miss_blocks + 1),
-                            db.get_scheduled_witness(miss_blocks + 1),
-                            key, skip);
+                           db.get_scheduled_witness(miss_blocks + 1),
+                           key, skip, pq_key);
    db.clear_pending();
    verify_asset_supplies(db);
    return block;
@@ -1555,6 +1556,29 @@ const liquidity_pool_object& database_fixture_base::create_liquidity_pool( accou
 {
    liquidity_pool_create_operation op = make_liquidity_pool_create_op( account, asset_a, asset_b, share_asset,
                                                                        taker_fee_percent, withdrawal_fee_percent );
+   trx.operations.clear();
+   trx.operations.push_back( op );
+
+   for( auto& o : trx.operations ) db.current_fee_schedule().set_fee(o);
+   trx.validate();
+   set_expiration( db, trx );
+   processed_transaction ptx = PUSH_TX(db, trx, ~0);
+   const operation_result& op_result = ptx.operation_results.front();
+   trx.operations.clear();
+   verify_asset_supplies(db);
+   return db.get<liquidity_pool_object>( *op_result.get<generic_operation_result>().new_objects.begin() );
+}
+
+const liquidity_pool_object& database_fixture_base::create_stable_liquidity_pool(
+                                                  account_id_type account, asset_id_type asset_a,
+                                                  asset_id_type asset_b, asset_id_type share_asset,
+                                                  uint16_t taker_fee_percent, uint16_t withdrawal_fee_percent,
+                                                  uint64_t amplification )
+{
+   liquidity_pool_create_operation op = make_liquidity_pool_create_op( account, asset_a, asset_b, share_asset,
+                                                                       taker_fee_percent, withdrawal_fee_percent );
+   op.extensions.value.pool_type = static_cast<uint8_t>( liquidity_pool_curve_type::stable );
+   op.extensions.value.amplification = amplification;
    trx.operations.clear();
    trx.operations.push_back( op );
 
