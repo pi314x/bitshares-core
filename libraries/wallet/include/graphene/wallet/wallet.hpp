@@ -1463,17 +1463,33 @@ class wallet_api
        * @param url a URL to include in the witness record in the blockchain.  Clients may
        *            display this when showing a list of witnesses.  May be blank.
        * @param broadcast true to broadcast the transaction on the network
-       * @param block_pq_signing_key optional post-quantum (ML-DSA) block signing key, in
-       *            base58. When set, the witness must sign its blocks with the matching PQ
-       *            private key, supplied to the node via --pq-private-key. Requires the
-       *            PQ_0 hardfork to be active. The empty string leaves the witness on
-       *            classical block signing.
        * @returns the signed transaction registering a witness
        */
       signed_transaction create_witness( const string& owner_account,
                                          const string& url,
-                                         bool broadcast = false,
-                                         const string& block_pq_signing_key = "" )const;
+                                         bool broadcast = false )const;
+
+      /**
+       * Register a witness that signs its blocks with a post-quantum key.
+       *
+       * Separate from create_witness() rather than an extra parameter on it. The wallet API
+       * applies no default arguments over RPC -- every parameter must be supplied -- so
+       * adding one to an existing method breaks every caller written against the previous
+       * signature. A new name leaves those callers alone.
+       *
+       * @param owner_account the name or id of the account which is creating the witness
+       * @param url a URL to include in the witness record in the blockchain.  May be blank.
+       * @param block_pq_signing_key post-quantum (ML-DSA) block signing key, in base58. The
+       *            witness must sign its blocks with the matching PQ private key, supplied
+       *            to the node via --pq-private-key. Requires the PQ_0 hardfork to be
+       *            active. The empty string leaves the witness on classical block signing.
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction registering a witness
+       */
+      signed_transaction create_witness_pq( const string& owner_account,
+                                            const string& url,
+                                            const string& block_pq_signing_key,
+                                            bool broadcast = false )const;
 
       /**
        * Update a witness object owned by the given account.
@@ -1488,8 +1504,29 @@ class wallet_api
       signed_transaction update_witness( const string& witness_name,
                                          const string& url,
                                          const string& block_signing_key,
-                                         bool broadcast = false,
-                                         const string& block_pq_signing_key = "" )const;
+                                         bool broadcast = false )const;
+
+      /**
+       * Update a witness object, including its post-quantum block signing key.
+       *
+       * Separate from update_witness() for the same reason create_witness_pq() is separate
+       * from create_witness(): see that method.
+       *
+       * @param witness_name The name of the witness's owner account.
+       *                     Also accepts the ID of the owner account or the ID of the witness.
+       * @param url Same as for create_witness.  The empty string makes it remain the same.
+       * @param block_signing_key The new block signing public key.  The empty string makes it
+       *                          remain the same.
+       * @param block_pq_signing_key The new post-quantum (ML-DSA) block signing key, in
+       *                             base58.  The empty string makes it remain the same.
+       * @param broadcast true if you wish to broadcast the transaction.
+       * @return the signed transaction
+       */
+      signed_transaction update_witness_pq( const string& witness_name,
+                                            const string& url,
+                                            const string& block_signing_key,
+                                            const string& block_pq_signing_key,
+                                            bool broadcast = false )const;
 
 
       /**
@@ -1949,7 +1986,9 @@ FC_API( graphene::wallet::wallet_api,
         (list_witnesses)
         (list_committee_members)
         (create_witness)
+        (create_witness_pq)
         (update_witness)
+        (update_witness_pq)
         (create_worker)
         (update_worker_votes)
         (htlc_create)
