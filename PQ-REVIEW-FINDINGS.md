@@ -3,10 +3,12 @@
 A security and correctness review of the post-quantum (ML-DSA / ML-KEM) hardfork and
 StableSwap branch, with the fixes applied on branch `pq-hardfork-review`.
 
-Forty-one issues were found. Thirty-nine are fixed. One was a consensus parameter changed
-without justification, which is reverted; one is a wallet API break left for a product
-decision. This document exists so the branch explains itself without reference to the
-conversation that produced it.
+Thirty-nine distinct issues were found and all are addressed. Findings are labelled 01–41,
+but the labels carry gaps and sub-numbers from the order of discovery, so the highest label is
+not the count. One of them, the block interval, was a consensus parameter changed without
+justification and is reverted rather than fixed — that revert is the maintainers' to confirm.
+This document exists so the branch explains itself without reference to the conversation that
+produced it.
 
 ## The one thing to understand first
 
@@ -125,22 +127,29 @@ this class of defect is invisible to synthetic testing by construction.
 
 ## Finding 41: the wallet API's arity changed under existing callers
 
-Not fixed, because fixing it is a product decision rather than a defect to correct.
-
-The branch gave `update_witness` a fifth parameter and `create_witness` a fourth, both with
-C++ default values. Those defaults do nothing over RPC: this wallet applies no default
-arguments through its API layer, as can be confirmed against an untouched method —
-`transfer` with its defaulted `broadcast` omitted fails in exactly the same way:
+`create_witness` and `update_witness` had gained a trailing post-quantum signing-key
+parameter carrying a C++ default. That default does nothing over RPC: this wallet applies no
+default arguments through its API layer, which is confirmable against an untouched method —
+`transfer` with its defaulted `broadcast` omitted fails the same way:
 
     Assert Exception: a0 != e || optional_args: too few arguments passed to method
 
-So every script, tool or integration calling the previously documented four-parameter
-`update_witness` now fails outright. It is the same shape as finding 40 — appending to a
-published interface and assuming existing callers still work — in the API surface rather
-than the wire format, and with a much smaller blast radius.
+So every script or integration calling the documented four-parameter `update_witness` failed
+outright. The same shape as finding 40 — appending to a published interface and assuming
+existing callers still work — on the API surface rather than the wire format.
 
-Worth a deliberate decision: either accept the break and document it in the release notes, or
-keep the old arity working by adding the post-quantum variants as separately named methods.
+Fixed by restoring the original signatures and exposing the post-quantum capability under new
+names, `create_witness_pq` and `update_witness_pq`. Existing callers are untouched, and the
+header records why it is a separate method rather than an extra parameter.
+
+Verified on a devnet, all four reaching the evaluator:
+
+| call | arguments | result |
+|---|---|---|
+| `update_witness` | 4 | accepted (previously rejected) |
+| `update_witness_pq` | 5 | accepted |
+| `create_witness` | 3 | accepted |
+| `create_witness_pq` | 4 | accepted |
 
 ## Finding 39: the block interval, reverted
 
