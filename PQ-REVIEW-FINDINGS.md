@@ -122,6 +122,25 @@ decode; the other 34,997, eleven devnet runs, a green 602-case suite and two ful
 all missed it. A chain built from a fresh genesis has no history to be incompatible with, so
 this class of defect is invisible to synthetic testing by construction.
 
+## Finding 41: the wallet API's arity changed under existing callers
+
+Not fixed, because fixing it is a product decision rather than a defect to correct.
+
+The branch gave `update_witness` a fifth parameter and `create_witness` a fourth, both with
+C++ default values. Those defaults do nothing over RPC: this wallet applies no default
+arguments through its API layer, as can be confirmed against an untouched method —
+`transfer` with its defaulted `broadcast` omitted fails in exactly the same way:
+
+    Assert Exception: a0 != e || optional_args: too few arguments passed to method
+
+So every script, tool or integration calling the previously documented four-parameter
+`update_witness` now fails outright. It is the same shape as finding 40 — appending to a
+published interface and assuming existing callers still work — in the API surface rather
+than the wire format, and with a much smaller blast radius.
+
+Worth a deliberate decision: either accept the break and document it in the release notes, or
+keep the old arity working by adding the post-quantum variants as separately named methods.
+
 ## Finding 39: the block interval, reverted
 
 The branch changed `GRAPHENE_DEFAULT_BLOCK_INTERVAL` from 5 seconds to 3. It was the only edit
@@ -147,6 +166,7 @@ the genesis file's own value. That is pre-existing upstream behaviour.
 |---|---|
 | Full test suite | 602 / 602 cases, 10,711,860 assertions, 0 failures |
 | Multi-node activation (5s blocks) | producer + follower cross the hardfork, third node joins from genesis |
+| Operations sweep across activation | 12 operations each side, 6 transaction-bearing blocks each side, fresh node replays all of it |
 | Regression suite, against unfixed code | each case fails; verified by temporarily reverting the fixes |
 | Mainnet block log replay | see below |
 
@@ -161,6 +181,13 @@ hardfork, rebuilds, and restores the original hardfork time on exit:
 
     GENESIS_SRC=/path/to/genesis.json WITNESS_KEY='["<pub>","<wif>"]' \
       tests/pq_activation_devnet.sh 900
+
+The operations sweep drives real transactions through cli_wallet on both sides of the
+activation and then has a fresh node replay them, which is what exercises the merkle root,
+packed size and signer recovery at the boundary:
+
+    GENESIS_SRC=/path/to/genesis.json WITNESS_KEY='["<pub>","<wif>"]' \
+      tests/pq_operations_sweep.sh 1200
 
 The mainnet replay is skipped unless pointed at a block log. It opens the log strictly
 read-only:
@@ -179,6 +206,11 @@ Four of these defects were invisible to any single-process test and only appeare
 nodes talked to each other across an activation. Three more were invisible to the devnet as
 well, because every block it produced was empty, and were found by reading. Every one of them
 passed the entire existing test suite before it was found.
+
+Two of the caching defects were only reachable with blocks that carry transactions, and for a
+long time every devnet run here produced empty ones. An activation test that crosses the
+hardfork on an idle chain looks reassuring and proves very little; `tests/pq_operations_sweep.sh`
+exists because of that.
 
 If one practice is worth carrying forward, it is that **multi-node activation should be a
 standing gate**, not a one-off — which is what `tests/pq_activation_devnet.sh` exists to make
