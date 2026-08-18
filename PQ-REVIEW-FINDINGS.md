@@ -3,9 +3,10 @@
 A security and correctness review of the post-quantum (ML-DSA / ML-KEM) hardfork and
 StableSwap branch, with the fixes applied on branch `pq-hardfork-review`.
 
-Thirty-nine issues were found. Thirty-eight are fixed; the last was a consensus parameter
-that had been changed without justification and is reverted. This document exists so the
-branch explains itself without reference to the conversation that produced it.
+Forty-one issues were found. Thirty-nine are fixed. One was a consensus parameter changed
+without justification, which is reverted; one is a wallet API break left for a product
+decision. This document exists so the branch explains itself without reference to the
+conversation that produced it.
 
 ## The one thing to understand first
 
