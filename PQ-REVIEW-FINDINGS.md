@@ -5,8 +5,9 @@ StableSwap branch, with the fixes applied on branch `pq-hardfork-review`.
 
 Thirty-nine distinct issues were found and all are addressed. Findings are labelled 01–41,
 but the labels carry gaps and sub-numbers from the order of discovery, so the highest label is
-not the count. One of them, the block interval, was a consensus parameter changed without
-justification and is reverted rather than fixed — that revert is the maintainers' to confirm.
+not the count. One of them, the block interval, is reverted rather than fixed, and that revert is the
+maintainers' to confirm — see finding 39, which also records a correction to an earlier
+mischaracterisation of it.
 This document exists so the branch explains itself without reference to the conversation that
 produced it.
 
@@ -151,24 +152,53 @@ Verified on a devnet, all four reaching the evaluator:
 | `create_witness` | 3 | accepted |
 | `create_witness_pq` | 4 | accepted |
 
-## Finding 39: the block interval, reverted
+## Finding 39: the block interval, reverted — but not for the reason first given
 
-The branch changed `GRAPHENE_DEFAULT_BLOCK_INTERVAL` from 5 seconds to 3. It was the only edit
-in `config.hpp`, is unreferenced by either feature, and broke 26 tests through the genesis
-alignment assert in `db_genesis.cpp` (the fixture's constant 1431700000 divides by 5, not 3).
+The branch changed `GRAPHENE_DEFAULT_BLOCK_INTERVAL` from 5 seconds to 3. An earlier draft of
+this document called that unrelated to either feature and probably left-over devnet tuning.
+**That was wrong**, and the correction is worth recording because it changes how the decision
+should be read.
 
-The constant has exactly three uses — the default initialiser for `chain_parameters::block_interval`,
-that assert, and the `get_config` API. **None is a live-chain consensus path**: every consensus
-site reads `block_interval` from chain state, so a running chain's cadence is fixed at its
-genesis and was never at risk. What the change did affect is any *new* chain built from this
-code, the value published to clients, and the test suite.
+BitShares mainnet runs at 3-second blocks and always has. Measured directly from a recorded
+block log of 113,292,219 blocks:
 
-Measured both ways: at 3, 16 tests fail and 11 abort; at 5, all 602 pass. Reverted to 5;
-`config.hpp` is now byte-identical to upstream.
+    early (2015)   gaps: 3s x270, 6s x29     (6s = one missed slot)
+    2017           gaps: 3s x298
+    2020           gaps: 3s x299
+    recent         gaps: 3s x299
 
-Note in passing, and **not** changed here: the assert validates the genesis timestamp against
-the compile-time constant rather than against `genesis_state.initial_parameters.block_interval`,
-the genesis file's own value. That is pre-existing upstream behaviour.
+and `libraries/egenesis/genesis.json` sets `block_interval: 3`. So 5 is the Graphene framework
+default, which BitShares overrode in its own genesis years ago, and setting the constant to 3
+plausibly aligns the default with the chain this software actually ships for.
+
+The revert stands anyway, on a different argument. The constant governs only chains whose
+genesis omits `block_interval`. Mainnet sets it explicitly. This branch's own
+`libraries/egenesis/genesis-pq.json` sets it explicitly too. The one thing that inherits the
+compile-time default is the **test fixture** — which is exactly why changing the constant moves
+six tests and nothing else.
+
+Measured with the genesis timestamp aligned to 3 (so that the `init_genesis()` divisibility
+assert is satisfied and alignment is not a confounder), interval 3 gives 598 of 604 passing.
+The six failures are:
+
+| test | why it fails at 3s |
+|---|---|
+| `block_tests/change_block_interval` | hardcoded `5u` / `10u` where the same file elsewhere derives from `parameters.block_interval` |
+| `operation_tests/witness_pay_test` | budget 594 → 357, per-block pay 259 → 156 |
+| `operation_tests/force_settle_test` | force-settled volume 50 → 0 |
+| `settle_tests/settle_order_cancel_due_to_no_feed` (x2) | the price feed has not expired yet — lifetime in seconds spans more blocks |
+| `block_tests/miss_some_blocks` | which witnesses miss their slots shifts |
+
+Only the first is a literal. The rest are expected economic outcomes computed for a 5-second
+chain: at 3 seconds a maintenance interval contains 5/3 as many blocks, so budgets, per-block
+pay and feed-lifetime-versus-block-count all genuinely differ. Recomputing them is domain work,
+and tuning numbers until the suite goes green would mask real regressions.
+
+So: the change buys this branch nothing it does not already have through its own genesis, and
+costs six tests that cannot be corrected mechanically. Reverted here, with `config.hpp` left
+byte-identical to upstream. **Aligning the framework default with mainnet is a reasonable
+change on its own merits** — it should be made deliberately, in its own right, with those five
+tests' expectations recomputed for a 3-second chain.
 
 ## Verification
 
