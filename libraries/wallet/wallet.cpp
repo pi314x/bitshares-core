@@ -961,8 +961,15 @@ committee_member_object wallet_api::get_committee_member( const string& owner_ac
 
 signed_transaction wallet_api::create_witness( const string& owner_account,
                                                const string& url,
-                                               bool broadcast /* = false */,
-                                               const string& block_pq_signing_key /* = "" */ )const
+                                               bool broadcast /* = false */ )const
+{
+   return my->create_witness(owner_account, url, broadcast, "");
+}
+
+signed_transaction wallet_api::create_witness_pq( const string& owner_account,
+                                                  const string& url,
+                                                  const string& block_pq_signing_key,
+                                                  bool broadcast /* = false */ )const
 {
    return my->create_witness(owner_account, url, broadcast, block_pq_signing_key);
 }
@@ -993,8 +1000,17 @@ signed_transaction wallet_api::update_witness(
    const string& witness_name,
    const string& url,
    const string& block_signing_key,
-   bool broadcast /* = false */,
-   const string& block_pq_signing_key /* = "" */ )const
+   bool broadcast /* = false */ )const
+{
+   return my->update_witness(witness_name, url, block_signing_key, broadcast, "");
+}
+
+signed_transaction wallet_api::update_witness_pq(
+   const string& witness_name,
+   const string& url,
+   const string& block_signing_key,
+   const string& block_pq_signing_key,
+   bool broadcast /* = false */ )const
 {
    return my->update_witness(witness_name, url, block_signing_key, broadcast, block_pq_signing_key);
 }
