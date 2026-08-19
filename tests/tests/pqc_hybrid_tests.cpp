@@ -179,7 +179,7 @@ BOOST_AUTO_TEST_CASE( pq_authority_in_object_database )
    // PQ features are gated behind both the hardfork time AND the
    // pq_serialization_active committee parameter (see HARDFORK_PQ_0_PASSED
    // usages in account_evaluator.cpp / db_block.cpp); tests must activate
-   // both explicitly, same as stableswap_create_test does for its own
+   // both explicitly, rather than relying on either default
    // hardfork. Directly modifying global_property_object is the standard
    // test-only shortcut for chain parameters that are normally set via a
    // committee proposal (see e.g. change_fees() in database_fixture.cpp).
