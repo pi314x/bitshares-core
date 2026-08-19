@@ -190,6 +190,7 @@ public:
                           const string& owner_or_active_key_string,
                           optional<uint8_t> algorithm );
    signed_transaction migrate_wallet( const string& account_name_or_id, bool broadcast );
+   signed_transaction migrate_wallet_pq_only( const string& account_name_or_id, bool broadcast );
 
    vector< signed_transaction > import_balance( string name_or_id, const vector<string>& wif_keys, bool broadcast );
 

@@ -693,8 +693,19 @@ namespace graphene { namespace wallet { namespace detail {
          _pq_keys[ pq_pub ] = pq_priv.to_base58();
       };
 
-      // hybrid migration: keep the existing key_auths untouched, add PQ keys
-      // with full weight so either scheme can authorize (Approach B)
+      // Hybrid migration: the existing key_auths stay, and PQ keys are added alongside at
+      // full weight, so either scheme can authorize.
+      //
+      // Be clear about what that is and is not. check_authority() sums weights and succeeds
+      // as soon as the threshold is met, trying key_auths first, so an account in this state
+      // remains fully controllable by its classical key alone. Against an adversary who can
+      // break secp256k1 -- the adversary post-quantum cryptography exists for -- this adds
+      // nothing. It is an OR, not an AND.
+      //
+      // It is still the right default, because it is reversible and cannot lock anyone out
+      // while they verify their PQ key works. But an account is only quantum-resistant once
+      // no classical key remains in its authority, which is what migrate_wallet_pq_only()
+      // does. Nothing here should be read as protection on its own.
       for( const auto& k : new_active.key_auths )
          if( _keys.count( k.first ) )
             add_pq_from( new_active, _keys.at( k.first ) );
@@ -712,6 +723,68 @@ namespace graphene { namespace wallet { namespace detail {
       tx.operations.push_back( op );
       set_operation_fees( tx, get_global_properties().parameters.get_current_fees() );
       tx.validate();
+      return sign_transaction2( tx, vector<public_key_type>(), broadcast );
+   }
+
+   signed_transaction wallet_api_impl::migrate_wallet_pq_only( const string& account_name_or_id,
+         bool broadcast )
+   {
+   require_pq_active();
+      const account_object account = get_account( account_name_or_id );
+
+      // Replace each authority outright rather than editing the existing one: the point is
+      // that no classical key survives. An authority that still lists a key_auth meeting its
+      // threshold is satisfiable without any post-quantum signature at all.
+      auto pq_only = []( const authority& current,
+                         std::map<pq_public_key_type, string>& store ) -> authority
+      {
+         authority result;
+         result.weight_threshold = current.weight_threshold;
+         // account_auths are kept: they delegate to another account, whose own authority is
+         // checked recursively, so they do not themselves imply a classical key here.
+         result.account_auths = current.account_auths;
+
+         // One post-quantum key per classical key being retired, each carrying the weight
+         // that key had, so the threshold arithmetic is unchanged.
+         for( const auto& k : current.key_auths )
+         {
+            fc::pq_private_key pq_priv = fc::pq_private_key::generate( fc::pq_algorithm::ml_dsa_65 );
+            pq_public_key_type pq_pub( pq_priv.get_public_key() );
+            result.pq_key_auths[ pq_pub ] = k.second;
+            store[ pq_pub ] = pq_priv.to_base58();
+         }
+         // Any post-quantum keys already present are carried over.
+         for( const auto& k : current.pq_key_auths )
+            result.pq_key_auths[ k.first ] = k.second;
+
+         return result;
+      };
+
+      authority new_active = pq_only( account.active, _pq_keys );
+      authority new_owner  = pq_only( account.owner,  _pq_keys );
+
+      FC_ASSERT( new_active.key_auths.empty() && new_owner.key_auths.empty(),
+                 "internal error: a classical key survived a post-quantum-only migration" );
+      FC_ASSERT( !new_active.pq_key_auths.empty() && !new_owner.pq_key_auths.empty(),
+                 "refusing to write an authority with no post-quantum key: the account would "
+                 "become unusable" );
+      FC_ASSERT( new_active.address_auths.empty() && new_owner.address_auths.empty(),
+                 "this account has address authorities, which are classical; migrate them "
+                 "before moving to a post-quantum-only authority" );
+
+      account_update_operation op;
+      op.account = account.id;
+      op.fee = account_update_operation::fee_params_t().fee;
+      op.owner  = new_owner;
+      op.active = new_active;
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      // Signed with the classical key that still controls the account at this instant; from
+      // the block this lands in, only the post-quantum keys can authorize it.
       return sign_transaction2( tx, vector<public_key_type>(), broadcast );
    }
 

@@ -679,16 +679,52 @@ class wallet_api
                              const string& owner_or_active_key_string = string(),
                              const optional<uint8_t>& algorithm = optional<uint8_t>() )const;
 
-      /** Builds a transaction that adds post-quantum (FIPS 204 ML-DSA) keys to
-       *  the account's owner/active authorities (hybrid migration), keeping the
-       *  legacy keys intact. The PQ keys are derived deterministically from the
-       *  account's existing keys.
+      /** Adds post-quantum (FIPS 204 ML-DSA) keys to the account's owner and active
+       *  authorities, keeping the existing classical keys in place.
+       *
+       *  \warning This does NOT make the account quantum-resistant, and is not meant to.
+       *  An authority is satisfied as soon as its weight threshold is met, and the classical
+       *  keys are still there at their original weight, so the account remains fully
+       *  controllable by its secp256k1 key alone. Against an adversary who can break
+       *  secp256k1 the added key changes nothing: it is an OR, not an AND.
+       *
+       *  It is the right first step because it cannot lock anyone out -- classical access
+       *  still works while the post-quantum key is verified and backed up with
+       *  \c dump_pq_private_keys(). Quantum resistance begins only when no classical key
+       *  remains in the authority, which is \c migrate_wallet_pq_only().
+       *
+       *  The post-quantum keys are generated from independent randomness, not derived from
+       *  the classical keys; deriving them from the secret they are meant to outlive would
+       *  defeat the purpose.
        *
        * @param account_name_or_id the account to migrate
        * @param broadcast true to broadcast the transaction on the network
        * @returns the signed transaction
        */
       signed_transaction migrate_wallet( const string& account_name_or_id, bool broadcast )const;
+
+      /** Replaces the account's owner and active authorities with post-quantum-only ones,
+       *  retiring every classical key.
+       *
+       *  This is what actually makes an account quantum-resistant. Each classical key is
+       *  replaced by a freshly generated ML-DSA key carrying the same weight, so the
+       *  threshold arithmetic is unchanged, and any post-quantum keys already present are
+       *  kept. Account authorities are preserved, since they delegate to another account
+       *  whose own authority is checked in turn.
+       *
+       *  \warning Irreversible in practice. From the block this lands in, the account can
+       *  only be authorized by the new post-quantum keys. Export them with
+       *  \c dump_pq_private_keys() and confirm the backup before running this: losing the
+       *  wallet file afterwards means losing the account. The command refuses to write an
+       *  authority that has no post-quantum key, and refuses accounts holding address
+       *  authorities, which are classical and would silently remain spendable.
+       *
+       * @param account_name_or_id the account to migrate
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction migrate_wallet_pq_only( const string& account_name_or_id,
+                                                 bool broadcast )const;
 
       /** Imports accounts from a BitShares 0.x wallet file.
        * Current wallet file must be unlocked to perform the import.
@@ -2033,6 +2069,7 @@ FC_API( graphene::wallet::wallet_api,
         (generate_pq_key)
         (import_pq_key)
         (migrate_wallet)
+        (migrate_wallet_pq_only)
         (propose_parameter_change)
         (propose_fee_change)
         (approve_proposal)
