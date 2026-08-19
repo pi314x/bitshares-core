@@ -148,6 +148,24 @@ database_fixture_base::~database_fixture_base()
 void database_fixture_base::init_genesis( database_fixture_base& fixture )
 {
    fixture.genesis_state.initial_timestamp = fc::time_point_sec(GRAPHENE_TESTING_GENESIS_TIMESTAMP);
+
+   // Pin the test chain's cadence rather than inheriting GRAPHENE_DEFAULT_BLOCK_INTERVAL.
+   //
+   // A good number of tests encode five-second timing in their expectations: how many blocks
+   // fit in a maintenance interval, and therefore witness pay budgets and per-block pay; how
+   // many blocks a price feed's lifetime spans, and therefore whether it has expired; which
+   // witness is scheduled after a given number of blocks, and therefore which ones miss their
+   // slots. Those expectations were written against the default when it was 5, and inheriting
+   // the constant made the dependency invisible -- changing the default silently rewrote what
+   // the suite was testing.
+   //
+   // Mainnet runs at three seconds (libraries/egenesis/genesis.json sets block_interval: 3),
+   // so the default now matches it. Stating the test chain's interval here keeps those
+   // expectations valid and makes the assumption explicit instead of accidental. A suite that
+   // exercises the mainnet cadence would be worth having, but it means recomputing those
+   // economic expectations for a three-second chain, not just changing this line.
+   fixture.genesis_state.initial_parameters.block_interval = 5;
+
    if( fixture.current_test_name == "hf_1270_test" )
    {
       fixture.genesis_state.initial_active_witnesses = 20;
