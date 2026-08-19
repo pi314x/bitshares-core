@@ -656,6 +656,15 @@ signed_transaction wallet_api::migrate_wallet( const string& account_name_or_id,
    return tx;
 }
 
+signed_transaction wallet_api::migrate_wallet_pq_only( const string& account_name_or_id,
+                                                       bool broadcast )const
+{
+   FC_ASSERT(!is_locked());
+   auto tx = my->migrate_wallet_pq_only( account_name_or_id, broadcast );
+   save_wallet_file();
+   return tx;
+}
+
 map<string, bool, std::less<>> wallet_api::import_accounts( const string& filename, const string& password )const
 {
    FC_ASSERT( !is_locked() );
