@@ -225,7 +225,14 @@ namespace graphene { namespace protocol {
       vector<signature_type> signatures;
 
       /** Post-quantum signatures (NIST FIPS 204 ML-DSA); empty pre-hardfork */
-      vector<pq_signature> pq_signatures;
+      /**
+       * Post-quantum signatures. Gated at the TYPE level rather than by a hand-written pack:
+       * see fc::pq_gated. A struct that both reflects a field and hand-writes a gated pack has
+       * two serialisers for it, and which one a call site gets depends on visibility and
+       * inlining -- that divergence emitted one extra byte here under the legacy format in
+       * Release builds but not Debug ones.
+       */
+      fc::pq_gated<vector<pq_signature>> pq_signatures;
 
       /** Removes all operations and signatures */
       void clear() { operations.clear(); signatures.clear(); pq_signatures.clear(); }
