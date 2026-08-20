@@ -157,10 +157,14 @@ BOOST_AUTO_TEST_CASE( signed_transaction_dual_format )
       fc::raw::scoped_pq_format fmt( fc::raw::pq_format::current );
       current = fc::raw::pack( tx );
    }
+   // .value, not the field itself: pq_signatures is an fc::pq_gated, so packing the field
+   // here -- outside the scoped `current` block above -- would correctly emit nothing. Naming
+   // the wrapped vector states what is being asserted: the bytes the gated field contributes
+   // when the format says it is present.
    std::vector<char> expected_current = concat_vec(
       pack_field( static_cast<const transaction&>( tx ) ),
       pack_field( tx.signatures ),
-      pack_field( tx.pq_signatures ) );
+      pack_field( tx.pq_signatures.value ) );
    BOOST_CHECK( current == expected_current );
    BOOST_CHECK( legacy != current );
 
