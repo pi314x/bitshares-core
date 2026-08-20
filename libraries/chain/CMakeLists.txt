@@ -42,6 +42,8 @@ add_library( graphene_chain
              credit_offer_evaluator.cpp
              oracle_evaluator.cpp
              oracle_object.cpp
+             futures_evaluator.cpp
+             futures_object.cpp
              balance_evaluator.cpp
              account_evaluator.cpp
              assert_evaluator.cpp
