@@ -154,7 +154,7 @@ namespace graphene { namespace wallet { namespace detail {
          account_object to_account = get_account(to);
          md.to = to_account.options.memo_key;
          // only an account can publish a KEM key; a bare pubkey or label has nowhere to put one
-         to_pq_key = to_account.options.pq_memo_key;
+         to_pq_key = to_account.options.pq_memo_key.value;   // .value: gated wrapper, see fc::pq_gated
       } catch (const fc::exception&) {
          // check if the string itself is a pubkey, if not, consider it as a label
          try {

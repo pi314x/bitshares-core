@@ -73,7 +73,7 @@ namespace graphene { namespace protocol {
        * recorded on chain permanently, so traffic captured now becomes readable the moment
        * secp256k1 breaks. Nothing done later can undo that -- which is why this exists.
        */
-      optional< vector<char> > pq_ciphertext;
+      fc::pq_gated< optional< vector<char> > > pq_ciphertext;
 
       /// @note custom_nonce is for debugging only; do not set to a nonzero value in production
       void        set_message(const fc::ecc::private_key& priv,

@@ -44,7 +44,7 @@ namespace graphene { namespace protocol {
       string            url;
       public_key_type   block_signing_key;
       /// optional post-quantum (NIST FIPS 204 ML-DSA) block signing key
-      optional< pq_public_key_type > block_pq_signing_key;
+      fc::pq_gated< optional< pq_public_key_type > > block_pq_signing_key;
 
       account_id_type fee_payer()const { return witness_account; }
       void            validate()const;
@@ -71,7 +71,7 @@ namespace graphene { namespace protocol {
       /// The new block signing key.
       optional< public_key_type > new_signing_key;
       /// The new post-quantum (NIST FIPS 204 ML-DSA) block signing key.
-      optional< pq_public_key_type > new_pq_signing_key;
+      fc::pq_gated< optional< pq_public_key_type > > new_pq_signing_key;
 
       account_id_type fee_payer()const { return witness_account; }
       void            validate()const;
