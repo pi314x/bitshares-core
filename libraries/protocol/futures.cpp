@@ -163,6 +163,11 @@ void futures_liquidate_operation::validate()const
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
 }
 
+void futures_settle_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_options )
@@ -187,3 +192,6 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
       graphene::protocol::futures_position_adjust_margin_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_liquidate_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_settle_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_settle_operation )

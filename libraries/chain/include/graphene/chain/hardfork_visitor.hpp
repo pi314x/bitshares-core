@@ -78,7 +78,8 @@ struct hardfork_visitor {
                                            protocol::futures_order_cancel_operation,
                                            protocol::futures_fill_operation,
                                            protocol::futures_position_adjust_margin_operation,
-                                           protocol::futures_liquidate_operation >;
+                                           protocol::futures_liquidate_operation,
+                                           protocol::futures_settle_operation >;
 
    fc::time_point_sec now;
 
