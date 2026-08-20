@@ -42,6 +42,24 @@ void check_producers_exist( const database& d, const oracle_options& options )
                  "Producer account ${a} does not exist", ("a", p.first) );
 }
 
+/**
+ * Pushes a new value out to every market-issued asset fed by this oracle.
+ *
+ * Walking the oracle's own subscriber set rather than every bitasset on the chain: publishing
+ * is designed to happen every few seconds, and work proportional to the chain's total asset
+ * count does not belong in it. The set is capped at GRAPHENE_ORACLE_MAX_SUBSCRIBERS.
+ */
+void refresh_subscribers( database& d, const oracle_object& o )
+{
+   for( const auto& asset_id : o.subscribers )
+   {
+      const asset_object* a = d.find( asset_id );
+      if( nullptr == a || !a->is_market_issued() )
+         continue;   // defensive: an asset cannot stop being an MPA, but never assume it
+      d.update_bitasset_current_feed( a->bitasset_data( d ) );
+   }
+}
+
 } // namespace
 
 void_result oracle_create_evaluator::do_evaluate( const oracle_create_operation& op ) const
@@ -112,7 +130,12 @@ void_result oracle_update_evaluator::do_apply( const oracle_update_operation& op
    // response to a problem, and leaving the old aggregate standing until someone happens to
    // publish would defeat the point.
    if( op.new_options.valid() )
+   {
       d.modify( *_oracle, [now]( oracle_object& o ) { o.update_current_value( now ); } );
+      // Tightening quorum or dropping a producer can change or remove the value, and any
+      // asset fed by this oracle has to see that immediately, not at the next publish.
+      refresh_subscribers( d, *_oracle );
+   }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -127,11 +150,11 @@ void_result oracle_delete_evaluator::do_evaluate( const oracle_delete_operation&
    _oracle = &op.oracle_id(d);
    FC_ASSERT( _oracle->owner == op.owner, "Only the oracle's owner may delete it" );
 
-   // NOTE: nothing on chain can reference an oracle yet -- binding assets to oracles
-   // (price_oracle_id) is a later step. When it lands, delete must refuse while any asset
-   // still points here, or that asset would be left with no price source and no way to
-   // margin call. Deliberately not written as a vacuous loop over every asset in the
-   // meantime: an unreachable check is untestable, and an untested check is not a check.
+   // Deleting an oracle a smartcoin depends on would leave that asset with no price source,
+   // unable to margin call or force-settle. The issuer must unbind first.
+   FC_ASSERT( _oracle->subscribers.empty(),
+              "Oracle '${n}' is still the price source for ${c} asset(s); clear their "
+              "price_oracle_id first", ("n", _oracle->name)("c", _oracle->subscribers.size()) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -174,6 +197,8 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
       o.submissions[op.producer] = std::make_pair( now, op.value );
       o.update_current_value( now );
    } );
+
+   refresh_subscribers( d, *_oracle );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
