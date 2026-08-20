@@ -147,6 +147,35 @@ struct futures_fixture : database_fixture
       PUSH_TX( db, tx );
    }
 
+   void adjust_margin( futures_position_id_type pid, account_id_type who,
+                       const fc::ecc::private_key& key, int64_t delta )
+   {
+      futures_position_adjust_margin_operation op;
+      op.owner       = who;
+      op.position_id = pid;
+      op.delta       = delta;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
+   void liquidate( futures_position_id_type pid, account_id_type who,
+                   const fc::ecc::private_key& key )
+   {
+      futures_liquidate_operation op;
+      op.liquidator  = who;
+      op.position_id = pid;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
    const futures_position_object* position_of( futures_market_id_type mid, account_id_type who )
    {
       const auto& idx = db.get_index_type<futures_position_index>().indices()
@@ -156,27 +185,24 @@ struct futures_fixture : database_fixture
    }
 
    /**
-    * The solvency invariant: across every position in a market, sizes sum to zero and entry
-    * values sum to zero. Total PnL is therefore identically zero at ANY mark price, so the
-    * market cannot leak value however prices move. Asserted after every trading test.
+    * Every contract has a long and a short, so sizes must net to zero and open interest must
+    * equal the long side. Deliberately NOT asserting that entry values sum to zero: that is
+    * only true while closes are symmetric, and believing it hid a real insolvency. Conservation
+    * of collateral is checked by verify_asset_supplies, which the fixture runs anyway.
     */
-   void check_market_is_zero_sum( futures_market_id_type mid )
+   void check_market_is_balanced( futures_market_id_type mid )
    {
       share_type total_size = 0;
-      share_type total_entry = 0;
       share_type long_contracts = 0;
       const auto& idx = db.get_index_type<futures_position_index>().indices().get<by_id>();
       for( const auto& p : idx )
       {
          if( p.market_id != mid ) continue;
-         total_size  += p.size;
-         total_entry += p.entry_value;
+         total_size += p.size;
          if( p.size > 0 ) long_contracts += p.size;
       }
       BOOST_CHECK_MESSAGE( 0 == total_size.value,
                            "sum of position sizes is " + std::to_string( total_size.value ) );
-      BOOST_CHECK_MESSAGE( 0 == total_entry.value,
-                           "sum of entry values is " + std::to_string( total_entry.value ) );
       BOOST_CHECK_EQUAL( long_contracts.value, mid(db).open_interest.value );
    }
 
@@ -482,7 +508,7 @@ BOOST_AUTO_TEST_CASE( a_crossing_pair_opens_two_positions )
    BOOST_CHECK_EQUAL( carol_pos->margin.value, 100 );
 
    BOOST_CHECK_EQUAL( mid(db).open_interest.value, 10 );
-   check_market_is_zero_sum( mid );
+   check_market_is_balanced( mid );
 
    // margin actually left their balances (fees aside, which are charged in core too, so
    // compare the margin component by checking it is at least the margin)
@@ -508,7 +534,7 @@ BOOST_AUTO_TEST_CASE( closing_a_position_pays_out_margin_plus_pnl )
    // open: bob long 10 @ 100, carol short 10 @ 100
    place( mid, bob_id, bob_private_key, true, 100, 10 );
    place( mid, carol_id, carol_private_key, false, 100, 10 );
-   check_market_is_zero_sum( mid );
+   check_market_is_balanced( mid );
 
    // close at 120: bob sells 10, carol buys 10. Bob is up 10 x (120-100) = 200.
    const auto bob_before = db.get_balance( bob_id, core_id ).amount;
@@ -524,7 +550,7 @@ BOOST_AUTO_TEST_CASE( closing_a_position_pays_out_margin_plus_pnl )
    BOOST_CHECK_MESSAGE( bob_gain > 250 && bob_gain <= 300,
                         "bob's payout was " + std::to_string( bob_gain.value ) );
 
-   check_market_is_zero_sum( mid );
+   check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
 /// A partial fill leaves the remainder resting, and cancelling returns exactly what is left.
@@ -556,7 +582,7 @@ BOOST_AUTO_TEST_CASE( partial_fills_rest_and_cancel_returns_the_reservation )
    BOOST_REQUIRE( nullptr != bob_pos );
    BOOST_CHECK_EQUAL( bob_pos->size.value, 4 );
    BOOST_CHECK_EQUAL( bob_pos->margin.value, 40 );
-   check_market_is_zero_sum( mid );
+   check_market_is_balanced( mid );
 
    const auto before = db.get_balance( bob_id, core_id ).amount;
    cancel( bob_order, bob_id, bob_private_key );
@@ -591,7 +617,7 @@ BOOST_AUTO_TEST_CASE( trading_the_other_way_reduces_rather_than_hedges )
    BOOST_CHECK_EQUAL( position_of( mid, bob_id )->size.value, 6 );
    BOOST_CHECK_EQUAL( position_of( mid, carol_id )->size.value, -6 );
    BOOST_CHECK_EQUAL( mid(db).open_interest.value, 6 );
-   check_market_is_zero_sum( mid );
+   check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
 /// Self-matching would let one account pay itself the spread and build a position out of two
@@ -664,7 +690,7 @@ BOOST_AUTO_TEST_CASE( fill_or_kill_does_not_rest )
 
    // she reserved for 10 and used 40; the other 60 came back
    BOOST_CHECK_EQUAL( ( before - db.get_balance( carol_id, core_id ).amount ).value, 40 );
-   check_market_is_zero_sum( mid );
+   check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
 /// A halted or unmarked market must not accept orders.
@@ -703,6 +729,290 @@ BOOST_AUTO_TEST_CASE( orders_are_refused_when_the_market_is_not_tradable )
    PUSH_TX( db, tx );
 
    GRAPHENE_REQUIRE_THROW( place( mid, bob_id, bob_private_key, true, 100, 1 ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+BOOST_FIXTURE_TEST_SUITE( futures_invariant_tests, futures_fixture )
+
+/**
+ * An asymmetric close: one side exits against a fresh counterparty while the original other
+ * side stays open. This is the case that shows what the market-wide invariants actually are.
+ *
+ * Sum(size) is zero always. Sum(entry_value) is NOT: when a position closes, its realised PnL
+ * leaves as cash, and what remains in Sum(entry_value) is exactly the negative of everything
+ * paid out so far. Conservation of value is therefore not an entry_value identity -- it is
+ * checked by verify_asset_supplies, which accounts for every unit of collateral held in
+ * positions, resting orders and the insurance fund.
+ */
+BOOST_AUTO_TEST_CASE( sum_of_sizes_is_zero_but_entry_values_track_realised_pnl )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   // bob long 10 @ 100 against carol short 10 @ 100
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+
+   share_type total_size = 0, total_entry = 0;
+   auto tally = [&]() {
+      total_size = 0; total_entry = 0;
+      const auto& idx = db.get_index_type<futures_position_index>().indices().get<by_id>();
+      for( const auto& p : idx )
+         if( p.market_id == mid ) { total_size += p.size; total_entry += p.entry_value; }
+   };
+
+   tally();
+   BOOST_CHECK_EQUAL( total_size.value, 0 );
+   BOOST_CHECK_EQUAL( total_entry.value, 0 );   // nothing has closed yet
+
+   // bob exits at 120 against dan, who opens a fresh long. Carol stays short.
+   place( mid, dan_id, dan_private_key, true, 120, 10 );
+   place( mid, bob_id, bob_private_key, false, 120, 10 );
+
+   BOOST_CHECK( nullptr == position_of( mid, bob_id ) );   // bob is out, paid his 200 profit
+
+   tally();
+   // sizes still net to zero: dan is long 10, carol short 10
+   BOOST_CHECK_EQUAL( total_size.value, 0 );
+   BOOST_CHECK_EQUAL( position_of( mid, dan_id )->size.value, 10 );
+   BOOST_CHECK_EQUAL( position_of( mid, carol_id )->size.value, -10 );
+
+   // Because every fill settles the position to the mark, entry values are exactly size x mark
+   // afterwards and net to zero again -- dan +1000, carol -1000 at a mark of 100. Dan's loss
+   // from buying 20 above the mark was COLLECTED into his margin rather than left unrealised,
+   // which is what funds bob's payout. Collateral conservation is checked by
+   // verify_asset_supplies, which the fixture runs at the end of this test.
+   BOOST_CHECK_EQUAL( total_entry.value, 0 );
+   BOOST_CHECK_EQUAL( position_of( mid, dan_id )->unrealized_pnl( 100 ).value, 0 );
+   BOOST_CHECK_EQUAL( position_of( mid, carol_id )->unrealized_pnl( 100 ).value, 0 );
+
+   // dan paid for the bad entry: 120 reserved by his order plus 180 topped up = 300 in, and he
+   // holds 100 of margin. The 200 difference is exactly bob's profit.
+   BOOST_CHECK_EQUAL( position_of( mid, dan_id )->margin.value, 100 );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+BOOST_FIXTURE_TEST_SUITE( futures_risk_tests, futures_fixture )
+
+/// Opening a pair, then setting up so one side is under water at the mark.
+struct opened_pair
+{
+   futures_market_id_type mid;
+   oracle_id_type oid;
+};
+
+/// Margin can be added freely; withdrawal is bounded by the INITIAL requirement, not the
+/// maintenance one, so a trader cannot withdraw down to the edge of liquidation.
+BOOST_AUTO_TEST_CASE( margin_can_be_added_and_withdrawn_within_the_initial_requirement )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) ); fund( carol, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+
+   const auto pid = position_of( mid, bob_id )->get_id();
+   BOOST_CHECK_EQUAL( pid(db).margin.value, 100 );
+
+   adjust_margin( pid, bob_id, bob_private_key, 50 );
+   BOOST_CHECK_EQUAL( pid(db).margin.value, 150 );
+
+   // requirement is 10 x 100 x 10% = 100, so 50 may come back out
+   adjust_margin( pid, bob_id, bob_private_key, -50 );
+   BOOST_CHECK_EQUAL( pid(db).margin.value, 100 );
+
+   // but not a satoshi more
+   GRAPHENE_REQUIRE_THROW( adjust_margin( pid, bob_id, bob_private_key, -1 ), fc::exception );
+
+   // and not by anyone else
+   GRAPHENE_REQUIRE_THROW( adjust_margin( pid, carol_id, carol_private_key, 10 ), fc::exception );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+/// A healthy position must not be liquidatable. This is the check that stops liquidation being
+/// used as a weapon.
+BOOST_AUTO_TEST_CASE( a_healthy_position_cannot_be_liquidated )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+
+   const auto pid = position_of( mid, bob_id )->get_id();
+   GRAPHENE_REQUIRE_THROW( liquidate( pid, dan_id, dan_private_key ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// The mark moving against a leveraged long eventually puts it under the maintenance
+/// requirement, and then anyone may take it over.
+BOOST_AUTO_TEST_CASE( an_underwater_position_is_liquidated_and_handed_to_the_liquidator )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   // bob long 10 @ 100 with 100 margin, 10x leverage
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto pid = position_of( mid, bob_id )->get_id();
+
+   // the mark drops to 92: bob is down 80, equity 20, maintenance is 10 x 92 x 5% = 46
+   publish( oid, bob_id, bob_private_key, 92 );
+   BOOST_REQUIRE( mid(db).mark_price.valid() );
+   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 92 );
+   BOOST_CHECK_EQUAL( pid(db).equity( 92 ).value, 20 );
+
+   const auto bob_before = db.get_balance( bob_id, core_id ).amount;
+   const auto dan_before = db.get_balance( dan_id, core_id ).amount;
+
+   liquidate( pid, dan_id, dan_private_key );
+
+   // dan now owns it, at the mark, with a full initial margin
+   BOOST_REQUIRE( nullptr != db.find( pid ) );
+   BOOST_CHECK( pid(db).owner == dan_id );
+   BOOST_CHECK_EQUAL( pid(db).size.value, 10 );
+   BOOST_CHECK_EQUAL( pid(db).entry_value.value, 920 );      // handed over at the mark
+   BOOST_CHECK_EQUAL( pid(db).unrealized_pnl( 92 ).value, 0 );
+   BOOST_CHECK( pid(db).equity( 92 ) >= 92 );                // >= 10 x 92 x 10%
+
+   // bob keeps what is left after the penalty: equity 20 less 1% of the 920 notional, which
+   // rounds UP to 10 because rounding always favours the market.
+   const auto bob_gain = db.get_balance( bob_id, core_id ).amount - bob_before;
+   BOOST_CHECK_EQUAL( bob_gain.value, 10 );
+
+   // dan paid the top-up and kept the penalty as part of the position's margin
+   BOOST_CHECK( db.get_balance( dan_id, core_id ).amount < dan_before );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+/// Adding margin is the defence against liquidation, and it must actually work.
+BOOST_AUTO_TEST_CASE( adding_margin_prevents_liquidation )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto pid = position_of( mid, bob_id )->get_id();
+
+   publish( oid, bob_id, bob_private_key, 92 );
+   // bob tops up before anyone gets to him
+   adjust_margin( pid, bob_id, bob_private_key, 200 );
+
+   GRAPHENE_REQUIRE_THROW( liquidate( pid, dan_id, dan_private_key ), fc::exception );
+   BOOST_CHECK( pid(db).owner == bob_id );
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+/// Liquidating your own position would let a trader take the penalty from themselves and
+/// reset their entry at the mark.
+BOOST_AUTO_TEST_CASE( an_account_cannot_liquidate_itself )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) ); fund( carol, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto pid = position_of( mid, bob_id )->get_id();
+
+   publish( oid, bob_id, bob_private_key, 92 );
+   GRAPHENE_REQUIRE_THROW( liquidate( pid, bob_id, bob_private_key ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// A short is liquidated by the mark moving UP, symmetrically.
+BOOST_AUTO_TEST_CASE( a_short_is_liquidated_when_the_mark_rises )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto cpid = position_of( mid, carol_id )->get_id();
+   BOOST_CHECK_EQUAL( cpid(db).size.value, -10 );
+
+   // mark up to 108: carol is down 80, equity 20, maintenance 10 x 108 x 5% = 54
+   publish( oid, bob_id, bob_private_key, 108 );
+   BOOST_CHECK_EQUAL( cpid(db).equity( 108 ).value, 20 );
+
+   liquidate( cpid, dan_id, dan_private_key );
+   BOOST_CHECK( cpid(db).owner == dan_id );
+   BOOST_CHECK_EQUAL( cpid(db).size.value, -10 );
+   BOOST_CHECK_EQUAL( cpid(db).unrealized_pnl( 108 ).value, 0 );
+
+   check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()
