@@ -163,6 +163,7 @@ void database::initialize_evaluators()
    register_evaluator<futures_order_cancel_evaluator>();
    register_evaluator<futures_position_adjust_margin_evaluator>();
    register_evaluator<futures_liquidate_evaluator>();
+   register_evaluator<futures_settle_evaluator>();
 }
 
 void database::initialize_indexes()

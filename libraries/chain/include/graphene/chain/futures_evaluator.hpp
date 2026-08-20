@@ -110,6 +110,28 @@ namespace graphene { namespace chain {
          const futures_market_object*   _market = nullptr;
    };
 
+   /**
+    * Accrues funding on a perpetual if an interval has elapsed.
+    *
+    * Applied as a monotone cumulative index rather than by touching every position: a funding
+    * tick that walked the whole market would put unbounded work into whatever block happened
+    * to cross the interval boundary. A position pays the difference between the index and its
+    * own last value the next time it is touched.
+    */
+   void accrue_futures_funding( database& d, const futures_market_object& market );
+
+   class futures_settle_evaluator : public evaluator<futures_settle_evaluator>
+   {
+      public:
+         using operation_type = futures_settle_operation;
+
+         void_result do_evaluate( const futures_settle_operation& op );
+         void_result do_apply( const futures_settle_operation& op ) const;
+
+         const futures_market_object*   _market = nullptr;
+         const futures_position_object* _position = nullptr;
+   };
+
    class futures_market_update_evaluator : public evaluator<futures_market_update_evaluator>
    {
       public:

@@ -432,6 +432,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // liquidator
    }
+   void operator()( const futures_settle_operation& op )
+   {
+      _impacted.insert( op.fee_payer() );
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

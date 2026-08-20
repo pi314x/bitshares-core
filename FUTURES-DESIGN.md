@@ -185,13 +185,34 @@ at that price, and returns margin plus PnL. After settlement the market accepts 
 
 ## Staging
 
-1. `futures_market_object`, create/update, mark price tracking from the oracle, hardfork gate.
-2. Orders, matching, positions, margin.
-3. Mark-to-market and liquidation.
-4. Funding for perpetuals, settlement for dated contracts.
+1. ~~`futures_market_object`, create/update, mark price tracking from the oracle, hardfork gate.~~
+2. ~~Orders, matching, positions, margin.~~
+3. ~~Settlement pool, mark-to-market, liquidation.~~
+4. ~~Funding for perpetuals, settlement for dated contracts.~~
 
-Each stage lands with tests. Stage 1 alone is a market that quotes a mark price and cannot be
-traded — useful to get on chain first precisely because nothing depends on it yet.
+All four are done, in four commits, 28 tests.
+
+Two mechanisms were added during stage 3 that this document did not originally anticipate, and
+both exist because `verify_asset_supplies` failed rather than because anyone reasoned them out
+in advance:
+
+**The settlement pool.** Deducting a loser's loss from their margin and stopping there destroys
+it — the offsetting gain is still unrealised in some other position. Losers pay into the pool,
+winners are paid out of it, and `margin + pool` is conserved exactly. The field is
+`insurance_fund`; it doubles as the buffer for liquidation shortfalls.
+
+**Margin measured at the mark.** A position opened far from the mark is underwater immediately,
+and margin sized on the fill price does not cover it. Every fill now requires equity-at-mark to
+meet the initial requirement on both sides, funded from the trader's balance if the order's own
+reservation falls short.
+
+Funding is applied as a monotone `cumulative_funding` index, charged to a position the next time
+it is touched, so a funding tick never walks the market. It is skipped entirely when the book is
+one-sided: there is no mid, and a guessed funding rate moves real money on a made-up number.
+
+Settlement of a dated contract is permissionless and one position at a time, for the same reason
+liquidation is. The first caller after expiry snapshots the oracle into `settlement_price`, and
+every caller after that closes a named position against that same fixed number.
 
 ## Out of scope
 

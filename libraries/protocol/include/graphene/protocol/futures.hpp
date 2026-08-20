@@ -281,6 +281,33 @@ namespace graphene { namespace protocol {
       void            validate()const;
    };
 
+   /**
+    * @brief Settles a dated contract at expiry, and closes one position at the settled price.
+    * @ingroup operations
+    *
+    * Permissionless, and takes one position at a time, for the same reason liquidation does:
+    * walking every position in a market at expiry would put unbounded work into a block.
+    * The first caller after expiry snapshots the oracle into the settlement price; every
+    * caller after that closes whichever position they name against it.
+    */
+   struct futures_settle_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = GRAPHENE_BLOCKCHAIN_PRECISION / 2; };
+
+      asset                   fee;
+      account_id_type         payer;
+      futures_market_id_type  market_id;
+
+      /// Absent settles the market itself without closing anything, which is what lets a
+      /// market with no open positions still reach a settled state.
+      optional<futures_position_id_type> position_id;
+
+      extensions_type         extensions;
+
+      account_id_type fee_payer()const { return payer; }
+      void            validate()const;
+   };
+
    /// @return whether @p symbol is acceptable as a futures market symbol
    bool is_valid_futures_symbol( const string& symbol );
 
@@ -297,6 +324,9 @@ FC_REFLECT( graphene::protocol::futures_position_adjust_margin_operation,
             (fee)(owner)(position_id)(delta)(extensions) )
 FC_REFLECT( graphene::protocol::futures_liquidate_operation,
             (fee)(liquidator)(position_id)(extensions) )
+FC_REFLECT( graphene::protocol::futures_settle_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::futures_settle_operation,
+            (fee)(payer)(market_id)(position_id)(extensions) )
 
 FC_REFLECT( graphene::protocol::futures_market_create_operation::fee_params_t,
             (fee)(price_per_kbyte) )
@@ -342,3 +372,6 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
       graphene::protocol::futures_position_adjust_margin_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_liquidate_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_settle_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_settle_operation )
