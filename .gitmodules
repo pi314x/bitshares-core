@@ -4,5 +4,10 @@
     ignore = dirty
 [submodule "libraries/fc"]
     path = libraries/fc
-    url = https://github.com/bitshares/bitshares-fc.git
+    # Points at the fork while the post-quantum work is unmerged: the pinned commit
+    # carries fc/crypto/pqc.* , vendor/pqclean/ and fc::raw::pq_format, none of which
+    # exist upstream, so a clone against bitshares/bitshares-fc cannot build this branch.
+    # Revert to the upstream URL once the fc side is merged.
+    url = https://github.com/pi314x/bitshares-fc.git
+    branch = pq-hardfork-review
     ignore = dirty
