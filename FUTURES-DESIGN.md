@@ -50,11 +50,31 @@ inventing a second one.
 This is not a compromise: real exchanges quote futures in a fixed unit with a fixed tick size
 for exactly this reason.
 
-### Zero-sum, and which way rounding goes
+### The solvency invariant
 
-Every contract has exactly one long and one short, so total PnL must be exactly zero or the
-market leaks value. Integer prices make the PnL of the two sides exactly antisymmetric, so
-that holds by construction.
+Position accounting maintains two sums exactly, across every position in a market:
+
+```
+Σ size          = 0        as many contracts long as short
+Σ entry_value   = 0        every fill adds +n×p to the long and −n×p to the short
+```
+
+Total PnL is `Σ(size × mark) − Σ entry_value`, which is therefore identically zero at any
+mark price whatsoever. Solvency is not something the code has to be careful about; it falls
+out of the arithmetic, and a test asserts both sums after every fill.
+
+This is why `entry_value` is a running signed sum rather than an average entry price. An
+average would have to be divided out and rounded on every partial fill, and the two sides of
+a contract would round independently — which is exactly how a market quietly stops being
+zero-sum.
+
+It also removes division from partial closes entirely. Reducing a position just moves `size`
+toward zero and adjusts `entry_value` by `n × p`; nothing is realized. When `size` reaches
+zero the position holds `unrealized = 0 × mark − entry_value = −entry_value`, so the payout
+is `margin − entry_value` exactly, and the position is deleted. No proportional split, no
+rounding, no dust.
+
+### Which way rounding goes
 
 Where rounding is unavoidable — margin requirements, fees, funding — **it always rounds in
 favour of the market and against the trader**. Requirements round up, payouts round down. Dust
@@ -100,10 +120,6 @@ futures_order_object               1.26.x
   size                             contracts remaining
   deferred_margin                  collateral reserved while the order rests
 ```
-
-`entry_value` is a running sum rather than a weighted average entry price, deliberately. An
-average would have to be recomputed and rounded on every partial fill; a sum is exact and makes
-`pnl = size × mark − entry_value` exact too.
 
 ## Operations
 

@@ -138,7 +138,10 @@ namespace graphene { namespace protocol {
             /* 80 */ oracle_delete_operation,
             /* 81 */ oracle_publish_operation,
             /* 82 */ futures_market_create_operation,
-            /* 83 */ futures_market_update_operation
+            /* 83 */ futures_market_update_operation,
+            /* 84 */ futures_order_create_operation,
+            /* 85 */ futures_order_cancel_operation,
+            /* 86 */ futures_fill_operation           // VIRTUAL
          >;
 
    /**

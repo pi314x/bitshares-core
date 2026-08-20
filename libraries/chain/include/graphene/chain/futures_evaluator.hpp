@@ -55,6 +55,37 @@ namespace graphene { namespace chain {
          object_id_type do_apply( const futures_market_create_operation& op ) const;
    };
 
+   class futures_position_object;
+   class futures_order_object;
+
+   /// Margin required to hold @p size contracts at @p price under @p ratio, rounded UP.
+   /// Rounding up is the only safe direction: a requirement rounded down lets a position be
+   /// opened slightly under-collateralised, and the shortfall is the market's problem.
+   share_type futures_margin_required( share_type size, share_type price, uint16_t ratio );
+
+   class futures_order_create_evaluator : public evaluator<futures_order_create_evaluator>
+   {
+      public:
+         using operation_type = futures_order_create_operation;
+
+         void_result    do_evaluate( const futures_order_create_operation& op );
+         object_id_type do_apply( const futures_order_create_operation& op );
+
+         const futures_market_object* _market = nullptr;
+         share_type _required_margin;
+   };
+
+   class futures_order_cancel_evaluator : public evaluator<futures_order_cancel_evaluator>
+   {
+      public:
+         using operation_type = futures_order_cancel_operation;
+
+         void_result do_evaluate( const futures_order_cancel_operation& op );
+         void_result do_apply( const futures_order_cancel_operation& op ) const;
+
+         const futures_order_object* _order = nullptr;
+   };
+
    class futures_market_update_evaluator : public evaluator<futures_market_update_evaluator>
    {
       public:
