@@ -317,8 +317,7 @@ void pack_account_options_impl( Stream& s, const graphene::protocol::account_opt
    fc::raw::pack( s, v.num_committee, _max_depth );
    fc::raw::pack( s, v.votes, _max_depth );
    fc::raw::pack( s, v.extensions, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.pq_memo_key, _max_depth );
+   fc::raw::pack( s, v.pq_memo_key, _max_depth );   // gates itself; see fc::pq_gated
 }
 
 template<typename Stream>
@@ -333,10 +332,7 @@ void unpack_account_options_impl( Stream& s, graphene::protocol::account_options
    fc::raw::unpack( s, v.num_committee, _max_depth );
    fc::raw::unpack( s, v.votes, _max_depth );
    fc::raw::unpack( s, v.extensions, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.pq_memo_key, _max_depth );
-   else
-      v.pq_memo_key.reset();
+   fc::raw::unpack( s, v.pq_memo_key, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking account_options" ) }
 
 } // namespace detail

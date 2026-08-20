@@ -70,7 +70,7 @@ namespace graphene { namespace protocol {
        * Without a published key here a sender has nowhere to encapsulate to, so this field
        * is what actually makes post-quantum memos reachable rather than merely possible.
        */
-      optional< pq_public_key_type > pq_memo_key;
+      fc::pq_gated< optional< pq_public_key_type > > pq_memo_key;
 
       /// Whether this account is voting
       inline bool is_voting() const

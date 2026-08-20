@@ -53,7 +53,7 @@ namespace graphene { namespace protocol {
       bool                       validate_signee( const fc::ecc::public_key& expected_signee )const;
 
       signature_type             witness_signature;
-      fc::optional<pq_signature>  witness_pq_signature;
+      fc::pq_gated< fc::optional<pq_signature> >  witness_pq_signature;
 
       void                       sign_pq( const fc::pq_private_key& signer );
       bool                       validate_signee_pq( const pq_public_key_type& expected_signee )const;
@@ -94,10 +94,14 @@ namespace fc { namespace raw {
 
 void pack( datastream<size_t>& s, const graphene::protocol::signed_block_header& v, uint32_t _max_depth = FC_PACK_MAX_DEPTH );
 void pack( sha256::encoder& s, const graphene::protocol::signed_block_header& v, uint32_t _max_depth = FC_PACK_MAX_DEPTH );
-// sha224 is required because signed_block_header::id() hashes with fc::sha224. Without an
-// overload for this exact encoder type the call falls back to fc's generic reflected pack,
-// which emits witness_pq_signature unconditionally and so ignores the pq_format switch --
-// making every block id differ from a pre-PQ node's, from block 1, before any hardfork.
+// sha224 is required because signed_block_header::id() hashes with fc::sha224, and without an
+// overload for this exact encoder type the call falls back to fc's generic reflected pack.
+//
+// That fallback used to change the bytes: the reflected packer emitted witness_pq_signature
+// unconditionally, so every block id differed from a pre-PQ node's, from block 1, before any
+// hardfork. It no longer can -- the field is an fc::pq_gated and gates itself whichever packer
+// runs -- but the overload stays, because relying on the reflected path for a block id would
+// still be relying on which instantiation happens to win.
 void pack( sha224::encoder& s, const graphene::protocol::signed_block_header& v, uint32_t _max_depth = FC_PACK_MAX_DEPTH );
 void pack( datastream<char*>& s, const graphene::protocol::signed_block_header& v, uint32_t _max_depth = FC_PACK_MAX_DEPTH );
 void unpack( datastream<const char*>& s, graphene::protocol::signed_block_header& v, uint32_t _max_depth = FC_PACK_MAX_DEPTH );
