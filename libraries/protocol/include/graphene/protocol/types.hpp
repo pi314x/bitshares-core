@@ -384,6 +384,7 @@ GRAPHENE_DEFINE_IDS(protocol, protocol_ids, /*protocol objects are not prefixed*
                     /* 1.21.x */ (credit_offer)
                     /* 1.22.x */ (credit_deal)
                     /* 1.23.x */ (oracle)
+                    /* 1.24.x */ (futures_market)
                    )
 
 FC_REFLECT(graphene::protocol::public_key_type, (key_data))

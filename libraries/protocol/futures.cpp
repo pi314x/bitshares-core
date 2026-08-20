@@ -1,0 +1,132 @@
+/*
+ * Copyright (c) 2026 BitShares contributors.
+ *
+ * The MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+#include <graphene/protocol/futures.hpp>
+
+#include <fc/io/raw.hpp>
+
+namespace graphene { namespace protocol {
+
+bool is_valid_futures_symbol( const string& symbol )
+{
+   if( symbol.size() < GRAPHENE_FUTURES_MIN_SYMBOL_LENGTH
+       || symbol.size() > GRAPHENE_FUTURES_MAX_SYMBOL_LENGTH )
+      return false;
+
+   // Same restricted alphabet as oracle names, for the same reason: a symbol is how a trader
+   // picks a market out of a list, and a lookalike built from mixed case would be a way to get
+   // someone to trade the wrong contract.
+   char previous = 0;
+   for( size_t i = 0; i < symbol.size(); ++i )
+   {
+      const char c = symbol[i];
+      const bool is_alnum = ( c >= 'A' && c <= 'Z' ) || ( c >= '0' && c <= '9' );
+      const bool is_sep   = ( '.' == c || '-' == c );
+      if( !is_alnum && !is_sep )
+         return false;
+      if( is_sep && ( 0 == i || i + 1 == symbol.size() || '.' == previous || '-' == previous ) )
+         return false;
+      previous = c;
+   }
+   return true;
+}
+
+void futures_market_options::validate()const
+{
+   FC_ASSERT( initial_margin_ratio >= GRAPHENE_FUTURES_MIN_INITIAL_MARGIN_RATIO,
+              "Initial margin ratio must be at least ${m} (i.e. at most ${x}x leverage)",
+              ("m", GRAPHENE_FUTURES_MIN_INITIAL_MARGIN_RATIO)
+              ("x", GRAPHENE_100_PERCENT / GRAPHENE_FUTURES_MIN_INITIAL_MARGIN_RATIO) );
+   FC_ASSERT( initial_margin_ratio <= GRAPHENE_100_PERCENT,
+              "Initial margin ratio may not exceed 100%" );
+
+   FC_ASSERT( maintenance_margin_ratio > 0, "Maintenance margin ratio must be positive" );
+   // Equal ratios would make a position liquidatable the instant it opened: it would meet the
+   // requirement exactly, and the first adverse tick would put it under.
+   FC_ASSERT( maintenance_margin_ratio < initial_margin_ratio,
+              "Maintenance margin ratio (${m}) must be below the initial margin ratio (${i}), "
+              "otherwise a position is liquidatable the moment it is opened",
+              ("m", maintenance_margin_ratio)("i", initial_margin_ratio) );
+
+   FC_ASSERT( funding_interval_sec >= GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC,
+              "Funding interval must be at least ${s} seconds",
+              ("s", GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC) );
+   FC_ASSERT( max_funding_rate_ppm <= GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM,
+              "Maximum funding rate may not exceed ${m} ppm per interval",
+              ("m", GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM) );
+}
+
+void futures_market_create_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( is_valid_futures_symbol( symbol ),
+              "Futures symbol '${s}' is not valid: ${min}-${max} characters, uppercase letters, "
+              "digits, '.' and '-', with no leading, trailing or repeated separator",
+              ("s", symbol)("min", GRAPHENE_FUTURES_MIN_SYMBOL_LENGTH)
+              ("max", GRAPHENE_FUTURES_MAX_SYMBOL_LENGTH) );
+   FC_ASSERT( description.size() <= GRAPHENE_FUTURES_MAX_DESCRIPTION_LENGTH,
+              "Description should not exceed ${m} characters",
+              ("m", GRAPHENE_FUTURES_MAX_DESCRIPTION_LENGTH) );
+
+   FC_ASSERT( contract_size > 0, "Contract size must be positive" );
+   FC_ASSERT( contract_size <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Contract size may not exceed ${m}", ("m", GRAPHENE_MAX_SHARE_SUPPLY) );
+
+   options.validate();
+}
+
+share_type futures_market_create_operation::calculate_fee( const fee_params_t& schedule )const
+{
+   share_type core_fee_required = schedule.fee;
+   core_fee_required += calculate_data_fee( fc::raw::pack_size(*this), schedule.price_per_kbyte );
+   return core_fee_required;
+}
+
+void futures_market_update_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( new_description.valid() || new_options.valid(), "Should change something" );
+   if( new_description.valid() )
+      FC_ASSERT( new_description->size() <= GRAPHENE_FUTURES_MAX_DESCRIPTION_LENGTH,
+                 "Description should not exceed ${m} characters",
+                 ("m", GRAPHENE_FUTURES_MAX_DESCRIPTION_LENGTH) );
+   if( new_options.valid() )
+      new_options->validate();
+}
+
+share_type futures_market_update_operation::calculate_fee( const fee_params_t& schedule )const
+{
+   share_type core_fee_required = schedule.fee;
+   core_fee_required += calculate_data_fee( fc::raw::pack_size(*this), schedule.price_per_kbyte );
+   return core_fee_required;
+}
+
+} } // graphene::protocol
+
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_options )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_market_create_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_market_update_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_create_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_update_operation )

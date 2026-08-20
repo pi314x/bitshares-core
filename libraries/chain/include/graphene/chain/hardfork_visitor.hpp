@@ -72,6 +72,8 @@ struct hardfork_visitor {
                                           protocol::oracle_update_operation,
                                           protocol::oracle_delete_operation,
                                           protocol::oracle_publish_operation >;
+   using futures_ops = fc::typelist::list< protocol::futures_market_create_operation,
+                                           protocol::futures_market_update_operation >;
 
    fc::time_point_sec now;
 
@@ -110,6 +112,9 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<oracle_ops, Op>(), bool>
    visit() { return HARDFORK_ORACLE_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<futures_ops, Op>(), bool>
+   visit() { return HARDFORK_FUTURES_PASSED(now); }
    /// @}
 
    /// typelist::runtime::dispatch adaptor
