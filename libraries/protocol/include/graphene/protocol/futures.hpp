@@ -64,6 +64,13 @@ namespace graphene { namespace protocol {
       uint32_t funding_interval_sec = 28800;   // 8 hours, the common venue default
       uint32_t max_funding_rate_ppm = 750;     // 0.075% per interval
 
+      /**
+       * Share of a liquidated position's notional kept as a penalty, in GRAPHENE_100_PERCENT
+       * units. It is what pays the liquidator for taking the position on, so a market with no
+       * penalty has no liquidators and therefore no liquidation.
+       */
+      uint16_t liquidation_penalty_ratio = 100;   // 1%
+
       /// Whether new orders are accepted. Lets an owner halt a market without deleting it,
       /// which matters because deleting one with open positions must never be possible.
       bool enabled = true;
@@ -229,6 +236,51 @@ namespace graphene { namespace protocol {
       share_type calculate_fee( const fee_params_t& )const { return 0; }
    };
 
+   /**
+    * @brief Adds or withdraws margin on an open position.
+    * @ingroup operations
+    */
+   struct futures_position_adjust_margin_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = GRAPHENE_BLOCKCHAIN_PRECISION / 2; };
+
+      asset                     fee;
+      account_id_type           owner;
+      futures_position_id_type  position_id;
+
+      /// Positive to add margin, negative to withdraw it. A withdrawal that would leave the
+      /// position below its initial margin requirement is refused.
+      share_type                delta;
+
+      extensions_type           extensions;
+
+      account_id_type fee_payer()const { return owner; }
+      void            validate()const;
+   };
+
+   /**
+    * @brief Liquidates an under-margined position.
+    * @ingroup operations
+    *
+    * Permissionless on purpose. Scanning every position whenever the mark moves would put
+    * unbounded work into consensus, so liquidation is an economic activity instead: anyone may
+    * call it, it fails unless the position really is under water, and the liquidator takes the
+    * position over along with the penalty that makes doing so worthwhile.
+    */
+   struct futures_liquidate_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = GRAPHENE_BLOCKCHAIN_PRECISION / 2; };
+
+      asset                     fee;
+      account_id_type           liquidator;
+      futures_position_id_type  position_id;
+
+      extensions_type           extensions;
+
+      account_id_type fee_payer()const { return liquidator; }
+      void            validate()const;
+   };
+
    /// @return whether @p symbol is acceptable as a futures market symbol
    bool is_valid_futures_symbol( const string& symbol );
 
@@ -236,7 +288,15 @@ namespace graphene { namespace protocol {
 
 FC_REFLECT( graphene::protocol::futures_market_options,
             (initial_margin_ratio)(maintenance_margin_ratio)
-            (funding_interval_sec)(max_funding_rate_ppm)(enabled)(extensions) )
+            (funding_interval_sec)(max_funding_rate_ppm)
+            (liquidation_penalty_ratio)(enabled)(extensions) )
+
+FC_REFLECT( graphene::protocol::futures_position_adjust_margin_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::futures_liquidate_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::futures_position_adjust_margin_operation,
+            (fee)(owner)(position_id)(delta)(extensions) )
+FC_REFLECT( graphene::protocol::futures_liquidate_operation,
+            (fee)(liquidator)(position_id)(extensions) )
 
 FC_REFLECT( graphene::protocol::futures_market_create_operation::fee_params_t,
             (fee)(price_per_kbyte) )
@@ -275,3 +335,10 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operat
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_create_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_cancel_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_position_adjust_margin_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_liquidate_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_position_adjust_margin_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_liquidate_operation )

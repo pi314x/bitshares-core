@@ -424,6 +424,14 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.account_id );
    }
+   void operator()( const futures_position_adjust_margin_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const futures_liquidate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // liquidator
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

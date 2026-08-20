@@ -86,6 +86,30 @@ namespace graphene { namespace chain {
          const futures_order_object* _order = nullptr;
    };
 
+   class futures_position_adjust_margin_evaluator
+      : public evaluator<futures_position_adjust_margin_evaluator>
+   {
+      public:
+         using operation_type = futures_position_adjust_margin_operation;
+
+         void_result do_evaluate( const futures_position_adjust_margin_operation& op );
+         void_result do_apply( const futures_position_adjust_margin_operation& op ) const;
+
+         const futures_position_object* _position = nullptr;
+   };
+
+   class futures_liquidate_evaluator : public evaluator<futures_liquidate_evaluator>
+   {
+      public:
+         using operation_type = futures_liquidate_operation;
+
+         void_result do_evaluate( const futures_liquidate_operation& op );
+         void_result do_apply( const futures_liquidate_operation& op ) const;
+
+         const futures_position_object* _position = nullptr;
+         const futures_market_object*   _market = nullptr;
+   };
+
    class futures_market_update_evaluator : public evaluator<futures_market_update_evaluator>
    {
       public:
