@@ -25,6 +25,8 @@
 #include <graphene/chain/oracle_object.hpp>
 
 #include <graphene/chain/asset_object.hpp>
+#include <graphene/chain/futures_evaluator.hpp>
+#include <graphene/chain/futures_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
 
@@ -58,6 +60,11 @@ void refresh_subscribers( database& d, const oracle_object& o )
          continue;   // defensive: an asset cannot stop being an MPA, but never assume it
       d.update_bitasset_current_feed( a->bitasset_data( d ) );
    }
+
+   // Futures markets consume the same value as a mark price. They are found through their own
+   // by_oracle index rather than a subscriber list, because unlike a smartcoin a market is
+   // never bound and unbound -- its oracle is fixed at creation.
+   update_futures_markets_for_oracle( d, o );
 }
 
 } // namespace
@@ -155,6 +162,14 @@ void_result oracle_delete_evaluator::do_evaluate( const oracle_delete_operation&
    FC_ASSERT( _oracle->subscribers.empty(),
               "Oracle '${n}' is still the price source for ${c} asset(s); clear their "
               "price_oracle_id first", ("n", _oracle->name)("c", _oracle->subscribers.size()) );
+
+   // A futures market's oracle is fixed at creation and cannot be repointed, so unlike a
+   // smartcoin there is no "unbind first" for the owner to do -- deleting the oracle would
+   // strand the market without a mark price permanently. Refuse while any market exists.
+   const auto& futures_idx = d.get_index_type<futures_market_index>().indices().get<by_oracle>();
+   FC_ASSERT( futures_idx.lower_bound( op.oracle_id ) == futures_idx.upper_bound( op.oracle_id ),
+              "Oracle '${n}' is the price source for at least one futures market and cannot "
+              "be deleted", ("n", _oracle->name) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

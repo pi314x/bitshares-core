@@ -22,6 +22,7 @@
 #include <graphene/chain/samet_fund_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/futures_object.hpp>
 #include <graphene/chain/impacted.hpp>
 #include <graphene/chain/hardfork.hpp>
 
@@ -403,6 +404,14 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // producer
    }
+   void operator()( const futures_market_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const futures_market_update_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );
@@ -526,6 +535,10 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
            const auto* aobj = dynamic_cast<const credit_deal_object*>( obj );
            accounts.insert( aobj->offer_owner );
            accounts.insert( aobj->borrower );
+           break;
+        } case futures_market_object_type:{
+           const auto* aobj = dynamic_cast<const futures_market_object*>( obj );
+           accounts.insert( aobj->owner );
            break;
         } case oracle_object_type:{
            const auto* aobj = dynamic_cast<const oracle_object*>( obj );
