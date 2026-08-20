@@ -149,9 +149,12 @@ namespace graphene { namespace wallet { namespace detail {
          }
       }
       // same as above, for destination key
+      optional<pq_public_key_type> to_pq_key;
       try {
          account_object to_account = get_account(to);
          md.to = to_account.options.memo_key;
+         // only an account can publish a KEM key; a bare pubkey or label has nowhere to put one
+         to_pq_key = to_account.options.pq_memo_key;
       } catch (const fc::exception&) {
          // check if the string itself is a pubkey, if not, consider it as a label
          try {
@@ -163,9 +166,12 @@ namespace graphene { namespace wallet { namespace detail {
 
       // try to get private key of from and sign, if that fails, try to sign with to
       try {
-         md.set_message(get_private_key(md.from), md.to, memo);
+         encrypt_memo_message( md, get_private_key(md.from), to_pq_key, memo );
       } catch (const fc::exception&) {
          std::swap( md.from, md.to );
+         // the roles are reversed here, so the recipient is now md.to -- whose KEM key we did
+         // not look up. Fall back to the classical construction rather than encapsulating to
+         // the wrong party's key.
          md.set_message(get_private_key(md.from), md.to, memo);
          std::swap( md.from, md.to );
       }
@@ -186,11 +192,11 @@ namespace graphene { namespace wallet { namespace detail {
          if( _keys.count(memo->to) > 0 ) {
             auto my_key = wif_to_key(_keys.at(memo->to));
             FC_ASSERT(my_key, "Unable to recover private key to decrypt memo. Wallet may be corrupted.");
-            clear_text = memo->get_message(*my_key, memo->from);
+            clear_text = decrypt_memo_message( *memo, *my_key, memo->from );
          } else {
             auto my_key = wif_to_key(_keys.at(memo->from));
             FC_ASSERT(my_key, "Unable to recover private key to decrypt memo. Wallet may be corrupted.");
-            clear_text = memo->get_message(*my_key, memo->to);
+            clear_text = decrypt_memo_message( *memo, *my_key, memo->to );
          }
       } catch (const fc::exception& e) {
          elog("Error when decrypting memo: ${e}", ("e", e.to_detail_string()));
@@ -314,6 +320,88 @@ namespace graphene { namespace wallet { namespace detail {
    {
       return is_pq_active() ? fc::raw::pq_format::current : fc::raw::pq_format::legacy;
    }
+
+   void wallet_api_impl::encrypt_memo_message( memo_data& md,
+                                               const fc::ecc::private_key& from_priv,
+                                               const optional<pq_public_key_type>& to_pq_key,
+                                               const string& msg )
+   {
+      // is_pq_active() is not a nicety here. Before activation memo_data's ciphertext field is
+      // stripped on the wire, and the KEM shared secret is half of the AES key, so a hybrid
+      // memo written now would be confirmed on chain and permanently undecryptable -- by the
+      // recipient, the sender, and everyone else.
+      if( to_pq_key.valid() && is_pq_active() )
+      {
+         md.set_message_pq( from_priv, md.to, to_pq_key->data, msg );
+         return;
+      }
+      md.set_message( from_priv, md.to, msg );
+   }
+
+   string wallet_api_impl::decrypt_memo_message( const memo_data& md,
+                                                 const fc::ecc::private_key& my_key,
+                                                 const public_key_type& other )const
+   {
+      if( !md.pq_ciphertext.valid() )
+         return md.get_message( my_key, other );
+
+      // ML-KEM implicit rejection (FIPS 203 s7.3) returns a pseudorandom shared secret for a
+      // wrong secret key instead of reporting failure, so there is no way to identify the right
+      // key except to try each and let the memo checksum decide. A wallet holds a handful of
+      // these at most.
+      for( const auto& k : _pq_keys )
+      {
+         if( k.first.algorithm != fc::pq_algorithm::ml_kem_768 )
+            continue;
+         try {
+            auto priv = fc::pq_private_key::from_base58( k.second );
+            return md.get_message_pq( my_key, other, priv.key_ );
+         } catch( const fc::exception& ) {
+            continue;
+         }
+      }
+      FC_THROW( "This memo is encrypted to a post-quantum memo key that is not in this wallet. "
+                "Import it with import_pq_key(), or restore from the backup taken when "
+                "generate_pq_memo_key() was run." );
+   }
+
+   signed_transaction wallet_api_impl::generate_pq_memo_key( const string& account_name_or_id,
+                                                             bool broadcast )
+   { try {
+      FC_ASSERT( !self.is_locked() );
+      require_pq_active();
+      const account_object account = get_account( account_name_or_id );
+
+      auto kem = fc::pq_kem_generate( fc::pq_algorithm::ml_kem_768 );
+      FC_ASSERT( kem.valid(), "ML-KEM key generation failed" );
+
+      pq_public_key_type pub;
+      pub.algorithm = fc::pq_algorithm::ml_kem_768;
+      pub.data      = kem.pk;
+      pub.validate();
+
+      // Stored and persisted BEFORE the operation is broadcast, deliberately. The dangerous
+      // ordering is the other one: if the account_update confirmed and the secret were then
+      // lost, the account would advertise a key nobody can decrypt against, and every memo
+      // sent to it afterwards would be unreadable forever.
+      _pq_keys[ pub ] = fc::pq_private_key( fc::pq_algorithm::ml_kem_768, kem.sk, kem.pk )
+                           .to_base58();
+      save_wallet_file();
+
+      account_options opts = account.options;
+      opts.pq_memo_key = pub;
+
+      account_update_operation op;
+      op.account     = account.get_id();
+      op.new_options = opts;
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      return sign_transaction( tx, broadcast );
+   } FC_CAPTURE_AND_RETHROW( (account_name_or_id)(broadcast) ) }
 
    void wallet_api_impl::require_pq_active() const
    {
