@@ -85,7 +85,9 @@ BOOST_AUTO_TEST_CASE( authority_legacy_golden_bytes )
       pack_field( a.weight_threshold ),
       pack_field( a.account_auths ),
       pack_field( a.key_auths ),
-      pack_field( a.pq_key_auths ),
+      // .value for the same reason as in signed_transaction_dual_format: the field gates
+      // itself now, and this call sits outside the scoped `current` block above.
+      pack_field( a.pq_key_auths.value ),
       pack_field( a.address_auths ) );
    BOOST_CHECK( current == expected_current );
    BOOST_CHECK( legacy != current );

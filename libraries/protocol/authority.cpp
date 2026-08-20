@@ -52,8 +52,7 @@ void pack_authority_impl( Stream& s, const graphene::protocol::authority& v, uin
    fc::raw::pack( s, v.weight_threshold, _max_depth );
    fc::raw::pack( s, v.account_auths, _max_depth );
    fc::raw::pack( s, v.key_auths, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.pq_key_auths, _max_depth );
+   fc::raw::pack( s, v.pq_key_auths, _max_depth );   // gates itself; see fc::pq_gated
    fc::raw::pack( s, v.address_auths, _max_depth );
 }
 
@@ -65,10 +64,7 @@ void unpack_authority_impl( Stream& s, graphene::protocol::authority& v, uint32_
    fc::raw::unpack( s, v.weight_threshold, _max_depth );
    fc::raw::unpack( s, v.account_auths, _max_depth );
    fc::raw::unpack( s, v.key_auths, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.pq_key_auths, _max_depth );
-   else
-      v.pq_key_auths.clear();
+   fc::raw::unpack( s, v.pq_key_auths, _max_depth );
    fc::raw::unpack( s, v.address_auths, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking authority" ) }
 

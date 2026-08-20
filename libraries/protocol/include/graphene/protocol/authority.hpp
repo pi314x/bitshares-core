@@ -135,7 +135,9 @@ namespace graphene { namespace protocol {
       flat_map<account_id_type,weight_type> account_auths;
       flat_map<public_key_type,weight_type> key_auths;
       /** needed for backward compatibility only */
-      flat_map<pq_public_key_type,weight_type> pq_key_auths;
+      /// Gated at the type level; see fc::pq_gated. Reflecting a field AND hand-writing a
+      /// gated pack for it gives it two serialisers, and the wrong one can win.
+      fc::pq_gated<flat_map<pq_public_key_type,weight_type>> pq_key_auths;
       /** needed for backward compatibility only */
       flat_map<address,weight_type>         address_auths;
    };
