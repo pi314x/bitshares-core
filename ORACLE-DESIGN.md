@@ -183,13 +183,34 @@ and none of it is being built here:
 
 ## Build order
 
-1. `oracle_object`, its index, and the object type registration.
-2. `oracle_create` / `oracle_update` / `oracle_delete`, with evaluators and hardfork gating.
-3. `oracle_publish`, submission storage, and `median_of_latest`.
-4. History recording and `median_over_window`.
-5. Outlier handling.
-6. `price_oracle_id` on assets, and the `update_median_feeds()` branch.
-7. Wallet and database API support.
+1. ~~`oracle_object`, its index, and the object type registration.~~
+2. ~~`oracle_create` / `oracle_update` / `oracle_delete`, with evaluators and hardfork gating.~~
+3. ~~`oracle_publish`, submission storage, and `median_of_latest`.~~
+4. ~~History recording and `median_over_window`.~~
+5. ~~Outlier handling.~~
+6. ~~`price_oracle_id` on assets, and the feed branch.~~
+7. ~~Wallet and database API support.~~
 
-Each step lands with its own tests. Steps 1–3 are the useful minimum: a working, queryable
-oracle that nothing depends on yet, which is the safest thing to get on chain first.
+All seven are done. Two details settled during implementation that are worth recording:
+
+**Binding lives in `bitasset_options::ext`, not general asset options**, and can only be set
+via `asset_update_bitasset` — never at asset creation. The oracle's base asset has to be the
+smartcoin itself, which has no id yet while it is being created, so there would be nothing to
+validate the orientation against. Binding at creation is refused with a message saying so.
+
+That extension is encoded as a count followed by (field index, value) pairs, with indices from
+declaration order, so `price_oracle_id` had to be **appended**. Inserting it would have shifted
+every pre-existing field by one and made every historical asset operation decode into the wrong
+fields — the same class of defect the PQ review found in the witness operations. A test pins all
+seven tag numbers so a later edit that inserts rather than appends fails in CI.
+
+**The oracle supplies only the settlement price.** MCR, MSSR and ICR come from the asset's own
+options, which BSIP-75/77 already made owner-settable, and the core exchange rate is left null
+so the issuer's `asset_options::core_exchange_rate` keeps applying. An oracle publishes a market
+price, not a fee-conversion rate, and deriving one from the settlement price would quietly change
+how fees are charged.
+
+Publishing pushes the new value to bound assets in the same block, via a subscriber set held on
+the oracle. That set exists so a publish — an operation designed to be sent every few seconds —
+never does work proportional to the chain's total asset count, and it makes "refuse to delete an
+oracle something depends on" an O(1) check. It is capped at `GRAPHENE_ORACLE_MAX_SUBSCRIBERS`.

@@ -185,6 +185,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (current_value)
                     (current_value_time)
                     (current_value_producer_count)
+                    (subscribers)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::oracle_object )

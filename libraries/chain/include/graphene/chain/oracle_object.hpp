@@ -80,6 +80,20 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       /// oracle is reporting nothing.
       uint16_t         current_value_producer_count = 0;
 
+      /**
+       * Market-issued assets whose settlement price comes from this oracle.
+       *
+       * Maintained by the asset_update_bitasset evaluator rather than derived by scanning, for
+       * two reasons: publishing must refresh every bound asset's feed, and doing that by walking
+       * all bitassets on every publish would put work proportional to the whole chain's asset
+       * count into an operation designed to be sent every few seconds. It also makes the
+       * "refuse to delete an oracle something depends on" check O(1).
+       *
+       * Capped at GRAPHENE_ORACLE_MAX_SUBSCRIBERS so the work a single publish can trigger is
+       * bounded.
+       */
+      flat_set<asset_id_type> subscribers;
+
       /// @return whether a submission made at @p published is still live at @p now
       bool is_submission_live( time_point_sec published, time_point_sec now )const
       {
