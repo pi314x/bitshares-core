@@ -12,6 +12,11 @@
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/asset_ops.hpp>
+
+#include <fc/io/raw.hpp>
+
+#include <functional>
 
 #include "../common/database_fixture.hpp"
 
@@ -608,5 +613,387 @@ BOOST_AUTO_TEST_CASE( only_the_owner_may_update_or_delete )
    PUSH_TX( db, ok );
    BOOST_CHECK( nullptr == db.find( oid ) );
 } FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+BOOST_FIXTURE_TEST_SUITE( oracle_binding_tests, oracle_fixture )
+
+namespace {
+
+/// Binds (or, with an empty optional, unbinds) an oracle as a smartcoin's price source.
+void set_price_oracle( database_fixture& f, const asset_object& mia,
+                       account_id_type issuer, const fc::ecc::private_key& key,
+                       const optional<oracle_id_type>& oid )
+{
+   asset_update_bitasset_operation op;
+   op.issuer          = issuer;
+   op.asset_to_update = mia.get_id();
+   op.new_options     = mia.bitasset_data( f.db ).options;
+   op.new_options.extensions.value.price_oracle_id = oid;
+
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+} // namespace
+
+/// The whole point of the feature: a smartcoin's settlement price coming from an oracle
+/// rather than from per-asset feeds.
+BOOST_AUTO_TEST_CASE( a_smartcoin_takes_its_settlement_price_from_a_bound_oracle )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   // a smartcoin backed by CORE, issued by alice
+   const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   const auto mia_id = mia.get_id();
+
+   // an oracle quoting MIA/CORE, which is the orientation a settlement price uses
+   core_id = asset_id_type();
+   usd_id  = asset_id_type();
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "MIA.CORE";
+   cop.base_asset  = mia_id;
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id]   = 1;
+   cop.options.producers[carol_id] = 1;
+   cop.options.minimum_producers   = 2;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   auto pub = [&]( account_id_type who, const fc::ecc::private_key& key, int64_t core_amount ) {
+      oracle_publish_operation op;
+      op.producer  = who;
+      op.oracle_id = oid;
+      op.value     = price( asset( 1, mia_id ), asset( core_amount, asset_id_type() ) );
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+
+   pub( bob_id,   bob_private_key,   10 );
+   pub( carol_id, carol_private_key, 10 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+
+   // before binding, the smartcoin has no feed at all
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, oid );
+
+   // binding alone must publish the price through, without waiting for the next publish
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 10, asset_id_type() ) ) );
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 1u );
+
+   // a new value reaches the smartcoin in the same block it is published
+   pub( bob_id,   bob_private_key,   20 );
+   pub( carol_id, carol_private_key, 20 );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 20, asset_id_type() ) ) );
+
+   // unbinding returns the asset to the legacy feed path, which has no feeds here
+   set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, {} );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( oid(db).subscribers.empty() );
+} FC_LOG_AND_RETHROW() }
+
+/// An inverted oracle would margin-call every position on the asset, so the orientation is
+/// checked once at bind time rather than trusted on every read.
+BOOST_AUTO_TEST_CASE( an_oracle_quoting_the_wrong_pair_cannot_be_bound )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   const auto mia_id = mia.get_id();
+   const asset_object& other = create_user_issued_asset( "OTHERTEST" );
+
+   // quoted the wrong way round: CORE/MIA instead of MIA/CORE
+   oracle_create_operation inverted;
+   inverted.owner       = alice_id;
+   inverted.name        = "CORE.MIA";
+   inverted.base_asset  = asset_id_type();
+   inverted.quote_asset = mia_id;
+   inverted.options.producers[bob_id] = 1;
+   inverted.options.minimum_producers = 1;
+   signed_transaction t1;
+   t1.operations.push_back( inverted );
+   db.current_fee_schedule().set_fee( t1.operations.back() );
+   set_expiration( db, t1 );
+   t1.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type bad_id { PUSH_TX( db, t1 ).operation_results.front().get<object_id_type>() };
+
+   GRAPHENE_REQUIRE_THROW(
+      set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, bad_id ), fc::exception );
+
+   // right base, wrong quote: MIA/OTHER when the asset is backed by CORE
+   oracle_create_operation wrong_quote;
+   wrong_quote.owner       = alice_id;
+   wrong_quote.name        = "MIA.OTHER";
+   wrong_quote.base_asset  = mia_id;
+   wrong_quote.quote_asset = other.get_id();
+   wrong_quote.options.producers[bob_id] = 1;
+   wrong_quote.options.minimum_producers = 1;
+   signed_transaction t2;
+   t2.operations.push_back( wrong_quote );
+   db.current_fee_schedule().set_fee( t2.operations.back() );
+   set_expiration( db, t2 );
+   t2.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type wq_id { PUSH_TX( db, t2 ).operation_results.front().get<object_id_type>() };
+
+   GRAPHENE_REQUIRE_THROW(
+      set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, wq_id ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// Deleting the price source out from under a smartcoin would leave it unable to margin call.
+BOOST_AUTO_TEST_CASE( a_bound_oracle_cannot_be_deleted )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   const auto mia_id = mia.get_id();
+
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "MIA.CORE";
+   cop.base_asset  = mia_id;
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id] = 1;
+   cop.options.minimum_producers = 1;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, oid );
+
+   auto del = [&]() {
+      oracle_delete_operation dop;
+      dop.owner     = alice_id;
+      dop.oracle_id = oid;
+      signed_transaction tx;
+      tx.operations.push_back( dop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+
+   GRAPHENE_REQUIRE_THROW( del(), fc::exception );
+
+   // once the asset lets go, the oracle can be removed
+   set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, {} );
+   del();
+   BOOST_CHECK( nullptr == db.find( oid ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Losing quorum must remove the smartcoin's price rather than freeze it at the last value.
+BOOST_AUTO_TEST_CASE( losing_quorum_clears_the_bound_assets_feed )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   const auto mia_id = mia.get_id();
+
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "MIA.CORE";
+   cop.base_asset  = mia_id;
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id]   = 1;
+   cop.options.producers[carol_id] = 1;
+   cop.options.minimum_producers   = 2;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   auto pub = [&]( account_id_type who, const fc::ecc::private_key& key, int64_t n ) {
+      oracle_publish_operation op;
+      op.producer  = who;
+      op.oracle_id = oid;
+      op.value     = price( asset( 1, mia_id ), asset( n, asset_id_type() ) );
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+
+   pub( bob_id,   bob_private_key,   10 );
+   pub( carol_id, carol_private_key, 10 );
+   set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, oid );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Let the submissions age. Without this they carry the current head block time, so the
+   // shortened lifetime below would still count them as live and the test would prove nothing.
+   generate_block();
+   set_expiration( db, trx );
+
+   // shorten the lifetime so nothing published so far still counts
+   oracle_options tighter;
+   tighter.producers[bob_id]   = 1;
+   tighter.producers[carol_id] = 1;
+   tighter.minimum_producers   = 2;
+   tighter.value_lifetime_sec  = 1;    // everything published so far is now stale
+   {
+      oracle_update_operation uop;
+      uop.owner       = alice_id;
+      uop.oracle_id   = oid;
+      uop.new_options = tighter;
+      signed_transaction tx;
+      tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
+   BOOST_CHECK( !oid(db).current_value.valid() );
+   // and the smartcoin must see that immediately, not keep quoting a dead price
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+} FC_LOG_AND_RETHROW() }
+
+/// Binding is not allowed at creation: the oracle's base asset has to be the smartcoin, which
+/// has no id yet, so there would be nothing to validate the orientation against.
+BOOST_AUTO_TEST_CASE( a_price_oracle_cannot_be_set_when_creating_an_asset )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice );
+   fund( bob );
+
+   const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "MIA.CORE";
+   cop.base_asset  = mia.get_id();
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id] = 1;
+   cop.options.minimum_producers = 1;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   asset_create_operation acop;
+   acop.issuer = alice_id;
+   acop.symbol = "MIATWO";
+   acop.precision = 2;
+   acop.common_options.core_exchange_rate = price( asset(1,asset_id_type(1)), asset(1) );
+   acop.bitasset_opts = bitasset_options();
+   acop.bitasset_opts->extensions.value.price_oracle_id = oid;
+
+   signed_transaction tx;
+   tx.operations.push_back( acop );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( alice_private_key, db.get_chain_id() );
+   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+BOOST_AUTO_TEST_SUITE( oracle_wire_format_tests )
+
+/**
+ * price_oracle_id was appended to bitasset_options::ext, which is embedded in
+ * asset_create_operation and asset_update_bitasset_operation -- both on chain since genesis.
+ *
+ * graphene's extension<T> encodes a count followed by (field index, value) pairs, with indices
+ * assigned by declaration order in FC_REFLECT. Appending is therefore safe and inserting is
+ * catastrophic: every pre-existing field would shift by one and every historical asset
+ * operation would decode into the wrong fields. This pins the numbering so a later edit that
+ * inserts rather than appends fails here rather than on a live chain.
+ */
+BOOST_AUTO_TEST_CASE( appending_price_oracle_id_did_not_shift_existing_extension_tags )
+{
+   auto packed_ext_of = []( const bitasset_options& o ) {
+      return fc::raw::pack( o.extensions );
+   };
+
+   // no extensions at all: a single zero count byte, exactly as before this change
+   bitasset_options none;
+   auto empty = packed_ext_of( none );
+   BOOST_REQUIRE_EQUAL( empty.size(), 1u );
+   BOOST_CHECK_EQUAL( int( empty[0] ), 0 );
+
+   // one field set: count 1, then that field's index. The indices below are the on-chain
+   // numbering and must never change.
+   struct { const char* name; int expected_index; std::function<void(bitasset_options&)> set; } cases[] = {
+      { "initial_collateral_ratio",     0, []( bitasset_options& o ){ o.extensions.value.initial_collateral_ratio = 1750; } },
+      { "maintenance_collateral_ratio", 1, []( bitasset_options& o ){ o.extensions.value.maintenance_collateral_ratio = 1750; } },
+      { "maximum_short_squeeze_ratio",  2, []( bitasset_options& o ){ o.extensions.value.maximum_short_squeeze_ratio = 1100; } },
+      { "margin_call_fee_ratio",        3, []( bitasset_options& o ){ o.extensions.value.margin_call_fee_ratio = 10; } },
+      { "force_settle_fee_percent",     4, []( bitasset_options& o ){ o.extensions.value.force_settle_fee_percent = 10; } },
+      { "black_swan_response_method",   5, []( bitasset_options& o ){ o.extensions.value.black_swan_response_method = 1; } },
+      { "price_oracle_id",              6, []( bitasset_options& o ){ o.extensions.value.price_oracle_id = oracle_id_type(7); } },
+   };
+
+   for( const auto& c : cases )
+   {
+      bitasset_options o;
+      c.set( o );
+      auto bytes = packed_ext_of( o );
+      BOOST_REQUIRE_MESSAGE( bytes.size() >= 2, c.name );
+      BOOST_CHECK_MESSAGE( 1 == int( bytes[0] ), std::string( "count for " ) + c.name );
+      BOOST_CHECK_MESSAGE( c.expected_index == int( bytes[1] ),
+                           std::string( "extension tag for " ) + c.name + " changed" );
+   }
+
+   // and a round trip through the new field leaves the others untouched
+   bitasset_options o;
+   o.extensions.value.black_swan_response_method = 1;
+   o.extensions.value.price_oracle_id = oracle_id_type(7);
+   auto back = fc::raw::unpack<bitasset_options>( fc::raw::pack( o ) );
+   BOOST_REQUIRE( back.extensions.value.price_oracle_id.valid() );
+   BOOST_CHECK( *back.extensions.value.price_oracle_id == oracle_id_type(7) );
+   BOOST_REQUIRE( back.extensions.value.black_swan_response_method.valid() );
+   BOOST_CHECK_EQUAL( int( *back.extensions.value.black_swan_response_method ), 1 );
+   BOOST_CHECK( !back.extensions.value.initial_collateral_ratio.valid() );
+}
 
 BOOST_AUTO_TEST_SUITE_END()
