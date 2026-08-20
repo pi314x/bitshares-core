@@ -9,6 +9,21 @@ post-quantum safe, and none of the remaining distance can be closed by writing m
 Every gap below is a deployment decision — a hardfork date, a committee vote, an operator
 flag, or a user running a command.
 
+## Where the code lives
+
+The work spans **two repositories**, which matters for anyone reviewing or building it:
+
+| | |
+|---|---|
+| `bitshares-core` | consensus gating, evaluators, wallet, operations, tests |
+| `libraries/fc` (submodule) | the primitives — `fc/crypto/pqc.*`, `vendor/pqclean/`, and `fc::raw::pq_format` itself |
+
+`fc::raw::pq_format` is the mechanism every hardfork gate is built on, and it lives in the
+submodule. The submodule is therefore pinned to a branch on the fork rather than upstream,
+because the pinned commit is not reachable from `bitshares/bitshares-fc`. Both the URL and the
+pin need reverting to upstream once the fc side is merged, and **the fc side has to merge
+first** — core does not compile without it.
+
 ## The asymmetry that should drive priorities
 
 Not all of these surfaces fail the same way, and the difference is more important than the
@@ -147,15 +162,26 @@ run so CI stays hermetic):
 - Post-quantum fields are rejected before activation and accepted after, end to end through
   the chain database.
 - A PQ-signed transaction verifies and applies with no classical key in the authority.
+- **The vendored primitives match FIPS 203/204.** 262 known-answer checks against NIST's own
+  ACVP vectors (`libraries/fc/tests/crypto/pqc_kat/`): ML-KEM-768 keyGen, encapsulation and
+  decapsulation, and ML-DSA-65 keyGen, all reproducing NIST's expected outputs byte for byte.
+  ML-DSA-65 signature verification is checked on 15 cases, 12 of them tampered — modified
+  message, modified `z`, modified commitment, modified hint — so a verifier that accepted
+  forgeries would fail rather than pass a suite of valid signatures only. The decapsulation
+  group covers FIPS 203 §7.3 implicit rejection, where a malformed ciphertext must yield a
+  pseudorandom secret rather than an error.
 
 **Not verified:**
 
-- **No FIPS 203/204 conformance vectors.** PQClean is vendored without NIST KAT/ACVP test
-  vectors, so nothing in this tree proves the ML-DSA and ML-KEM implementations produce the
-  standard's answers — only that they are self-consistent (what this code encrypts, this
-  code decrypts). A self-consistent implementation of the wrong algorithm would pass every
-  test here. This should be closed before any mainnet activation; it is mechanical work, not
-  research.
+- **ML-DSA signature generation has no conformance vectors.** FIPS 204 deterministic signing
+  requires `rnd = 0`, and the vendored `crypto_sign_signature_ctx` always draws `rnd` from the
+  RNG (the hedged variant), so sigGen vectors cannot be run without a deterministic entry
+  point that does not exist yet. Signing is currently covered only indirectly: signatures this
+  code produces verify under a verifier that *is* checked against NIST vectors. Key
+  generation and verification — the two halves consensus actually depends on — are covered
+  directly.
+- Only the parameter sets in use (ML-KEM-768, ML-DSA-65) have conformance coverage. The
+  vendored tree also builds ML-KEM-512/1024 and ML-DSA-44/87, which nothing consumes.
 - No third-party cryptographic audit of the integration.
 - No side-channel analysis of the vendored primitives.
 - Performance under sustained load with PQ signatures on a real network. An ML-DSA-65
@@ -166,8 +192,9 @@ run so CI stays hermetic):
 
 In order:
 
-1. Add NIST KAT vectors for the vendored ML-DSA and ML-KEM parameter sets. Nothing else on
-   this list is safe to do first.
+1. ~~Add NIST KAT vectors for the vendored ML-DSA and ML-KEM parameter sets.~~ Done for
+   ML-KEM-768 and ML-DSA-65; ML-DSA signature generation still needs a deterministic entry
+   point before its vectors can be run.
 2. Independent review of the cryptographic integration.
 3. Measure PQ signature load on a realistic network — `maximum_transaction_size` must leave
    room for key-bearing operations (see the sizing note in `hardfork.d/PQ_0.hf`; the
