@@ -380,6 +380,24 @@ public:
 
    memo_data sign_memo(string from, string to, string memo);
 
+   /** Encrypts @p msg into @p md, choosing the hybrid post-quantum construction when the
+    *  recipient has published an ML-KEM memo key AND the chain has activated post-quantum
+    *  serialization. Both conditions matter: the KEM shared secret is part of the AES key,
+    *  so writing a hybrid memo while the ciphertext is still stripped on the wire would
+    *  produce a memo nobody can ever read. @p md.to must already be set. */
+   void encrypt_memo_message( memo_data& md, const fc::ecc::private_key& from_priv,
+                              const optional<pq_public_key_type>& to_pq_key, const string& msg );
+
+   /** Decrypts @p md with @p my_key, taking the post-quantum path when the memo carries a KEM
+    *  ciphertext. The memo records no hint of which ML-KEM key it was encapsulated to, so every
+    *  ML-KEM key in the wallet is tried and the memo checksum decides. */
+   string decrypt_memo_message( const memo_data& md, const fc::ecc::private_key& my_key,
+                                const public_key_type& other )const;
+
+   /** Generates an ML-KEM memo key, stores it, and publishes the public half in the account's
+    *  options so senders have somewhere to encapsulate to. */
+   signed_transaction generate_pq_memo_key( const string& account_name_or_id, bool broadcast );
+
    string read_memo(const memo_data& md);
 
    signed_message sign_message(string signer, string message);
