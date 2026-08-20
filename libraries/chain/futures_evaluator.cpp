@@ -145,6 +145,38 @@ object_id_type futures_market_create_evaluator::do_apply(
 namespace {
 
 /**
+ * Realises a position's PnL against the mark, moving it through the market's settlement pool.
+ *
+ * The pool is the piece that was missing. Deducting a loser's loss from their margin and
+ * stopping there DESTROYS it -- the offsetting gain is still unrealised in some other
+ * position, so nothing balances and the supply check shows collateral vanishing (it did: 80
+ * units, when liquidation settled a position without a pool to settle into).
+ *
+ * With the pool, value moves rather than evaporating: losers pay into it, winners are paid out
+ * of it, and margin + pool is conserved exactly. It can run negative when gains are realised
+ * before the matching losses are collected, which is recovered as the losing positions are
+ * next touched or liquidated.
+ *
+ * Exact, like everything else here: no division.
+ */
+void settle_to_mark( database& d, const futures_market_object& market,
+                     const futures_position_object& pos )
+{
+   if( !market.mark_price.valid() )
+      return;
+   const share_type mark = *market.mark_price;
+   const share_type pnl  = pos.size * mark - pos.entry_value;
+   if( 0 == pnl.value )
+      return;
+
+   d.modify( pos, [&]( futures_position_object& p ) {
+      p.margin      += pnl;
+      p.entry_value  = p.size * mark;
+   } );
+   d.modify( market, [&pnl]( futures_market_object& m ) { m.insurance_fund -= pnl; } );
+}
+
+/**
  * Applies one fill of @p n contracts at @p price to @p account's position in @p market.
  *
  * The whole of position accounting is these four lines, and that is the point. A fill adds
@@ -174,7 +206,10 @@ share_type apply_fill( database& d, const futures_market_object& market, account
          p.entry_value             = delta_value;
          p.margin                  = margin_in;
          p.last_cumulative_funding = market.cumulative_funding;
+
+         // Settled to the mark below, once the object exists.
       } );
+      settle_to_mark( d, market, *idx.find( boost::make_tuple( market.get_id(), account ) ) );
       return n;   // wholly opening
    }
 
@@ -186,7 +221,16 @@ share_type apply_fill( database& d, const futures_market_object& market, account
    {
       // Flat. unrealized = 0 x mark - entry_value = -entry_value, exactly the realised PnL,
       // so the payout is margin - entry_value with no rounding anywhere.
-      const share_type payout = pos.margin + margin_in - ( pos.entry_value + delta_value );
+      const share_type final_entry = pos.entry_value + delta_value;
+      const share_type payout = pos.margin + margin_in - final_entry;
+
+      // The payout can exceed what this trader ever deposited -- that is what a profit IS --
+      // and the excess has to come from somewhere real. It comes from the settlement pool,
+      // which the counterparty paid into when they opened away from the mark. Without this the
+      // profit is conjured and the supply check shows collateral appearing (it did: 200 units).
+      d.modify( market, [&final_entry]( futures_market_object& m )
+                        { m.insurance_fund += final_entry; } );
+
       if( payout > 0 )
          d.adjust_balance( account, asset( payout, market.collateral_asset ) );
       d.remove( pos );
@@ -197,10 +241,54 @@ share_type apply_fill( database& d, const futures_market_object& market, account
       p.size        = new_size;
       p.entry_value = p.entry_value + delta_value;
       p.margin      = p.margin + margin_in;
+
    } );
+
+   settle_to_mark( d, market, pos );
 
    const share_type new_abs = new_size >= 0 ? new_size : -new_size;
    return new_abs - old_abs;
+}
+
+/**
+ * After a fill, the position must be able to stand at the CURRENT MARK, not merely at the
+ * price it traded at.
+ *
+ * This is the check whose absence let a market pay out collateral it never held. A trade at a
+ * price far from the mark opens a position that is already underwater by the difference: buy
+ * at 120 while the mark is 100 and ten contracts are down 200 before the block ends. Margin
+ * sized on the fill price does not cover that, and when the counterparty later closes at a
+ * profit the market has to pay from money nobody posted.
+ *
+ * Requiring equity-at-mark to meet the initial margin requirement closes it: nobody can open a
+ * position whose immediate mark-to-market loss exceeds what they put up. Failing here rolls
+ * the whole operation back atomically.
+ */
+void require_margin_at_mark( database& d, const futures_market_object& market,
+                             account_id_type account )
+{
+   const auto& idx = d.get_index_type<futures_position_index>().indices().get<by_market_owner>();
+   auto itr = idx.find( boost::make_tuple( market.get_id(), account ) );
+   if( itr == idx.end() )
+      return;   // the fill closed the position outright
+
+   FC_ASSERT( market.mark_price.valid(), "Market has no mark price" );
+   const share_type mark = *market.mark_price;
+
+   const share_type equity   = itr->equity( mark );
+   const share_type required = futures_margin_required( itr->abs_size(), mark,
+                                                        market.options.initial_margin_ratio );
+   if( equity >= required )
+      return;
+
+   // Trading away from the mark is allowed, but it has to be funded. The order reserved margin
+   // against its own limit price, which does not cover the immediate mark-to-market loss, so
+   // the difference comes from the trader's balance. adjust_balance throws if it is not there,
+   // rolling the whole operation back -- which is the correct outcome, because the alternative
+   // is a position the market cannot pay out on.
+   const share_type shortfall = required - equity;
+   d.adjust_balance( account, -asset( shortfall, market.collateral_asset ) );
+   d.modify( *itr, [&shortfall]( futures_position_object& p ) { p.margin += shortfall; } );
 }
 
 /// Emits the virtual operation that records a fill in account history.
@@ -343,6 +431,11 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
       oi_delta += apply_fill( d, market, op.owner,       op.is_long, n, fill_price,
                               taker_share + taker_shortfall );
 
+      // Both sides, every fill. A maker resting far from the mark is exposed to exactly the
+      // same problem as a taker crossing to it.
+      require_margin_at_mark( d, market, maker_account );
+      require_margin_at_mark( d, market, op.owner );
+
       record_fill( d, market, maker_account, !op.is_long, n, fill_price, true );
       record_fill( d, market, op.owner,       op.is_long, n, fill_price, false );
 
@@ -398,6 +491,138 @@ void_result futures_order_cancel_evaluator::do_apply( const futures_order_cancel
       d.adjust_balance( _order->owner,
                         asset( _order->deferred_margin, market.collateral_asset ) );
    d.remove( *_order );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+
+void_result futures_position_adjust_margin_evaluator::do_evaluate(
+      const futures_position_adjust_margin_operation& op )
+{ try {
+   const database& d = db();
+
+   FC_ASSERT( HARDFORK_FUTURES_PASSED( d.head_block_time() ),
+              "Not allowed until the futures hardfork" );
+
+   _position = &op.position_id(d);
+   FC_ASSERT( _position->owner == op.owner, "Only the position's owner may adjust its margin" );
+
+   if( op.delta < 0 )
+   {
+      const futures_market_object& market = _position->market_id(d);
+      FC_ASSERT( market.mark_price.valid(),
+                 "Margin cannot be withdrawn while the market has no mark price to measure "
+                 "the requirement against" );
+      const share_type mark = *market.mark_price;
+      const share_type required = futures_margin_required( _position->abs_size(), mark,
+                                                    market.options.initial_margin_ratio );
+      // Measured against the INITIAL requirement, not the maintenance one: withdrawing down to
+      // the liquidation threshold would leave a position one tick from being taken away.
+      FC_ASSERT( _position->equity( mark ) + op.delta >= required,
+                 "Withdrawing ${w} would leave equity ${e} against an initial margin "
+                 "requirement of ${r}",
+                 ("w", -op.delta)("e", _position->equity( mark ) + op.delta)("r", required) );
+   }
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+void_result futures_position_adjust_margin_evaluator::do_apply(
+      const futures_position_adjust_margin_operation& op ) const
+{ try {
+   database& d = db();
+   const futures_market_object& market = _position->market_id(d);
+
+   // Negative delta pays out, positive takes in; adjust_balance throws if the account cannot
+   // fund an addition, rolling the operation back.
+   d.adjust_balance( op.owner, asset( -op.delta, market.collateral_asset ) );
+   d.modify( *_position, [&op]( futures_position_object& p ) { p.margin += op.delta; } );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+void_result futures_liquidate_evaluator::do_evaluate( const futures_liquidate_operation& op )
+{ try {
+   const database& d = db();
+
+   FC_ASSERT( HARDFORK_FUTURES_PASSED( d.head_block_time() ),
+              "Not allowed until the futures hardfork" );
+
+   _position = &op.position_id(d);
+   _market   = &_position->market_id(d);
+
+   FC_ASSERT( _market->mark_price.valid(),
+              "Cannot liquidate while the market has no mark price: risk would be assessed "
+              "against a price nobody is asserting" );
+
+   const share_type mark = *_market->mark_price;
+   const share_type maintenance = futures_margin_required(
+         _position->abs_size(), mark, _market->options.maintenance_margin_ratio );
+
+   FC_ASSERT( _position->equity( mark ) < maintenance,
+              "Position is not liquidatable: equity ${e} still meets the maintenance "
+              "requirement of ${r} at mark ${m}",
+              ("e", _position->equity( mark ))("r", maintenance)("m", mark) );
+
+   FC_ASSERT( _position->owner != op.liquidator,
+              "An account cannot liquidate its own position; add margin instead" );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_operation& op ) const
+{ try {
+   database& d = db();
+   const futures_market_object& market = *_market;
+   const share_type mark = *market.mark_price;
+
+   // Settle through the pool first, so the stored margin IS the position's equity and
+   // everything below is plain arithmetic on one number that actually exists.
+   settle_to_mark( d, market, *_position );
+
+   share_type margin = _position->margin;
+   const share_type abs_size = _position->abs_size();
+   const account_id_type old_owner = _position->owner;
+
+   // A gap can leave a position worth less than nothing. The insurance fund exists for exactly
+   // this; if it cannot cover the whole deficit the remainder falls to the liquidator, who can
+   // see it before choosing to call.
+   share_type from_fund = 0;
+   if( margin < 0 )
+   {
+      const share_type deficit = -margin;
+      from_fund = market.insurance_fund > 0 ? std::min( deficit, market.insurance_fund )
+                                             : share_type( 0 );
+      margin = 0;
+   }
+
+   const share_type penalty = std::min(
+         futures_margin_required( abs_size, mark, market.options.liquidation_penalty_ratio ),
+         margin );
+   const share_type owner_payout = margin - penalty;   // >= 0 by the min above
+   const share_type retained     = penalty;            // stays with the position
+
+   const share_type required = futures_margin_required( abs_size, mark,
+                                                  market.options.initial_margin_ratio );
+   // The liquidator tops the position up to a full initial margin and keeps the penalty, which
+   // is what makes calling this worth doing.
+   const share_type top_up = ( required > retained ? required - retained : share_type(0) )
+                           + ( margin < 0 ? -margin - from_fund : share_type(0) );
+
+   d.adjust_balance( op.liquidator, -asset( top_up, market.collateral_asset ) );
+   if( owner_payout > 0 )
+      d.adjust_balance( old_owner, asset( owner_payout, market.collateral_asset ) );
+
+   if( from_fund > 0 )
+      d.modify( market, [&from_fund]( futures_market_object& m )
+                        { m.insurance_fund -= from_fund; } );
+
+   // entry_value is already at the mark after settling, so the position changes hands with no
+   // inherited unrealised PnL: the liquidator takes on a clean position plus the penalty.
+   d.modify( *_position, [&]( futures_position_object& p ) {
+      p.owner  = op.liquidator;
+      p.margin = retained + top_up + from_fund;
+   } );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

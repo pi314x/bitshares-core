@@ -50,29 +50,45 @@ inventing a second one.
 This is not a compromise: real exchanges quote futures in a fixed unit with a fixed tick size
 for exactly this reason.
 
-### The solvency invariant
+### The solvency invariant, correctly stated
 
-Position accounting maintains two sums exactly, across every position in a market:
+An earlier draft of this document claimed `Σ entry_value = 0` across a market. **That is
+false**, and believing it hid a real hole. It holds only while every close is symmetric. When
+one side exits against a fresh counterparty, its realised PnL leaves as cash and what remains
+in `Σ entry_value` is exactly the negative of everything paid out so far. A test
+(`sum_of_sizes_is_zero_but_entry_values_track_realised_pnl`) now demonstrates this rather than
+asserting the comfortable version.
+
+What is actually true:
 
 ```
-Σ size          = 0        as many contracts long as short
-Σ entry_value   = 0        every fill adds +n×p to the long and −n×p to the short
+Σ size                     = 0            always
+Σ (size × mark − entry_value) = −Σ entry_value = total cash paid out so far
 ```
 
-Total PnL is `Σ(size × mark) − Σ entry_value`, which is therefore identically zero at any
-mark price whatsoever. Solvency is not something the code has to be careful about; it falls
-out of the arithmetic, and a test asserts both sums after every fill.
+So conservation of value is **not** an `entry_value` identity. It is checked where it can
+actually be checked: `verify_asset_supplies` accounts for every unit of collateral held in
+positions, resting orders and the insurance fund, and fails if any is created or destroyed.
+That check is what caught the hole below.
 
-This is why `entry_value` is a running signed sum rather than an average entry price. An
-average would have to be divided out and rounded on every partial fill, and the two sides of
-a contract would round independently — which is exactly how a market quietly stops being
-zero-sum.
+**The hole.** Unrealised losses are not cash until they are collected. A position opened at a
+price far from the mark is underwater immediately — buy ten contracts at 120 while the mark is
+100 and it is down 200 before the block ends — and if its margin was sized on the *fill price*
+it does not cover that. When the counterparty later closes at a profit, the market pays from
+money nobody posted. Left unfixed, the supply check showed 200 units of collateral appearing
+from nowhere.
 
-It also removes division from partial closes entirely. Reducing a position just moves `size`
-toward zero and adjusts `entry_value` by `n × p`; nothing is realized. When `size` reaches
-zero the position holds `unrealized = 0 × mark − entry_value = −entry_value`, so the payout
-is `margin − entry_value` exactly, and the position is deleted. No proportional split, no
-rounding, no dust.
+**The fix.** After every fill, on both sides, the position's equity measured at the **mark
+price** must meet the initial margin requirement measured at the mark. Nobody can open a
+position whose immediate mark-to-market loss exceeds what they put up, so a close can always
+be paid from margin that is really there.
+
+`entry_value` stays a running signed sum rather than an average entry price, because an average
+would have to be divided out and rounded on every partial fill, with the two sides rounding
+independently. It also removes division from partial closes: reducing a position moves `size`
+toward zero and adjusts `entry_value` by `n × p`, realising nothing. When `size` reaches zero
+the position holds `−entry_value` of realised PnL, so the payout is `margin − entry_value`
+exactly. No proportional split, no dust.
 
 ### Which way rounding goes
 

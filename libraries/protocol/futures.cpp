@@ -75,6 +75,15 @@ void futures_market_options::validate()const
    FC_ASSERT( max_funding_rate_ppm <= GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM,
               "Maximum funding rate may not exceed ${m} ppm per interval",
               ("m", GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM) );
+
+   // A penalty at or above the maintenance requirement would take more than the position has
+   // left at the moment it is liquidated, leaving the owner owing money.
+   FC_ASSERT( liquidation_penalty_ratio > 0,
+              "Liquidation penalty must be positive, or nobody has any reason to liquidate" );
+   FC_ASSERT( liquidation_penalty_ratio < maintenance_margin_ratio,
+              "Liquidation penalty (${p}) must be below the maintenance margin ratio (${m}), "
+              "otherwise liquidation takes more than the position has left",
+              ("p", liquidation_penalty_ratio)("m", maintenance_margin_ratio) );
 }
 
 void futures_market_create_operation::validate()const
@@ -141,6 +150,19 @@ void futures_order_cancel_operation::validate()const
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
 }
 
+void futures_position_adjust_margin_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( delta != 0, "Margin adjustment must be non-zero" );
+   FC_ASSERT( delta >= -GRAPHENE_MAX_SHARE_SUPPLY && delta <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Margin adjustment is out of range" );
+}
+
+void futures_liquidate_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_options )
@@ -158,3 +180,10 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_oper
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_create_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_cancel_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_position_adjust_margin_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_liquidate_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_position_adjust_margin_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_liquidate_operation )
