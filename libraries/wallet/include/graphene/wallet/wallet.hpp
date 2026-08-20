@@ -726,6 +726,29 @@ class wallet_api
       signed_transaction migrate_wallet_pq_only( const string& account_name_or_id,
                                                  bool broadcast )const;
 
+      /** Generates a post-quantum (ML-KEM-768) memo key for an account and publishes the
+       *  public half in the account's options.
+       *
+       *  This is what makes post-quantum memos reachable. Until an account publishes a key,
+       *  senders have nowhere to encapsulate to and every memo written to it stays classical
+       *  -- readable by anyone who records the chain today and breaks secp256k1 later.
+       *  Once published, \c transfer() upgrades automatically; senders need no key of their
+       *  own and nothing to opt into.
+       *
+       *  The secret half is written to this wallet file before the transaction is broadcast.
+       *  Back it up with \c dump_pq_private_keys(): if the account advertises a key whose
+       *  secret is lost, memos sent to it afterwards are unreadable permanently, by everyone.
+       *
+       *  Requires the PQ_0 hardfork to have passed and the committee to have enabled
+       *  \c pq_serialization_active.
+       *
+       * @param account_name_or_id the account to publish a memo key for
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction generate_pq_memo_key( const string& account_name_or_id,
+                                               bool broadcast )const;
+
       /** Imports accounts from a BitShares 0.x wallet file.
        * Current wallet file must be unlocked to perform the import.
        *
@@ -2070,6 +2093,7 @@ FC_API( graphene::wallet::wallet_api,
         (import_pq_key)
         (migrate_wallet)
         (migrate_wallet_pq_only)
+        (generate_pq_memo_key)
         (propose_parameter_change)
         (propose_fee_change)
         (approve_proposal)
