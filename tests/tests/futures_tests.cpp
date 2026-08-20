@@ -1189,6 +1189,51 @@ BOOST_AUTO_TEST_CASE( funding_transfers_from_longs_to_shorts_when_the_book_is_ab
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
+/// A funding cap below 100 ppm must still work. It used to be converted into
+/// GRAPHENE_100_PERCENT units by an integer divide by 100, which turned every rate under
+/// 100 ppm into zero and switched funding off without saying so.
+BOOST_AUTO_TEST_CASE( a_small_funding_cap_is_not_rounded_away )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100000 );   // a mark big enough for ppm to bite
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;
+   cop.options.max_funding_rate_ppm = 50;   // below the old conversion's 100 ppm floor
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // a two-sided book well above the mark, so the premium is large and the cap is what binds
+   place( mid, dan_id, dan_private_key, true, 110000, 1 );
+   place( mid, alice_id, alice_private_key, false, 120000, 1 );
+
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100000 );
+
+   // 50 ppm of a 100000 mark is 5, and it must not be zero
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 5 );
+} FC_LOG_AND_RETHROW() }
+
 /// With one side of the book empty there is no mid, so no funding is charged. Guessing a
 /// funding rate would move real money on a made-up number.
 BOOST_AUTO_TEST_CASE( no_funding_accrues_without_a_two_sided_book )

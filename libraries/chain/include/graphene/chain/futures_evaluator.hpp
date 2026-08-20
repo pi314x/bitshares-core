@@ -58,6 +58,10 @@ namespace graphene { namespace chain {
    class futures_position_object;
    class futures_order_object;
 
+   /// @p ppm parts-per-million of @p amount, rounded UP. Used for the funding cap, which is
+   /// specified in ppm and must not collapse to zero for small rates.
+   share_type futures_ppm_of( share_type amount, uint32_t ppm );
+
    /// Margin required to hold @p size contracts at @p price under @p ratio, rounded UP.
    /// Rounding up is the only safe direction: a requirement rounded down lets a position be
    /// opened slightly under-collateralised, and the shortfall is the market's problem.
