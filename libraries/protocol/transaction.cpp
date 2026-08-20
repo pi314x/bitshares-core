@@ -593,8 +593,10 @@ void pack_signed_transaction_impl( Stream& s, const graphene::protocol::signed_t
    --_max_depth;
    fc::raw::pack( s, static_cast<const graphene::protocol::transaction&>(v), _max_depth );
    fc::raw::pack( s, v.signatures, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.pq_signatures, _max_depth );
+   // No format check here any more: pq_signatures is an fc::pq_gated, which gates itself on
+   // every path. The check used to live here, and the reflected packer -- which knows nothing
+   // about it -- disagreed.
+   fc::raw::pack( s, v.pq_signatures, _max_depth );
 }
 
 template<typename Stream>
@@ -604,10 +606,7 @@ void unpack_signed_transaction_impl( Stream& s, graphene::protocol::signed_trans
    --_max_depth;
    fc::raw::unpack( s, static_cast<graphene::protocol::transaction&>(v), _max_depth );
    fc::raw::unpack( s, v.signatures, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.pq_signatures, _max_depth );
-   else
-      v.pq_signatures.clear();
+   fc::raw::unpack( s, v.pq_signatures, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking signed_transaction" ) }
 
 template<typename Stream>
