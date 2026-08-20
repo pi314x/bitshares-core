@@ -62,6 +62,10 @@ void update_futures_mark_price( database& d, const futures_market_object& market
       m.mark_price = new_mark;
       m.mark_price_time = now;
    } );
+
+   // A new mark is the natural moment to check whether a funding interval has elapsed: it is
+   // driven by the oracle, which publishes continuously, so no separate timer is needed.
+   accrue_futures_funding( d, market );
 }
 
 void update_futures_markets_for_oracle( database& d, const oracle_object& o )
@@ -159,9 +163,34 @@ namespace {
  *
  * Exact, like everything else here: no division.
  */
+/**
+ * Charges a position whatever funding has accrued since it was last touched.
+ *
+ * Longs pay shorts when the book trades above the mark, and the reverse below it. The payment
+ * is size x (index delta), so the two sides are exactly antisymmetric and it nets to zero
+ * across the market -- it moves through the settlement pool for the same reason PnL does.
+ */
+void apply_funding( database& d, const futures_market_object& market,
+                    const futures_position_object& pos )
+{
+   const share_type delta = market.cumulative_funding - pos.last_cumulative_funding;
+   if( 0 == delta.value )
+      return;
+
+   // Positive index delta means longs pay: a long has size > 0, so payment > 0 leaves them.
+   const share_type payment = pos.size * delta;
+   d.modify( pos, [&]( futures_position_object& p ) {
+      p.margin                  -= payment;
+      p.last_cumulative_funding  = market.cumulative_funding;
+   } );
+   d.modify( market, [&payment]( futures_market_object& m ) { m.insurance_fund += payment; } );
+}
+
 void settle_to_mark( database& d, const futures_market_object& market,
                      const futures_position_object& pos )
 {
+   apply_funding( d, market, pos );
+
    if( !market.mark_price.valid() )
       return;
    const share_type mark = *market.mark_price;
@@ -533,6 +562,10 @@ void_result futures_position_adjust_margin_evaluator::do_apply(
    database& d = db();
    const futures_market_object& market = _position->market_id(d);
 
+   // Charge whatever funding has accrued first, so the margin being adjusted is the real
+   // current figure rather than one that silently owes the market money.
+   apply_funding( d, market, *_position );
+
    // Negative delta pays out, positive takes in; adjust_balance throws if the account cannot
    // fund an addition, rolling the operation back.
    d.adjust_balance( op.owner, asset( -op.delta, market.collateral_asset ) );
@@ -623,6 +656,123 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
       p.owner  = op.liquidator;
       p.margin = retained + top_up + from_fund;
    } );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+
+void accrue_futures_funding( database& d, const futures_market_object& market )
+{
+   if( !market.is_perpetual() || market.is_settled || !market.mark_price.valid() )
+      return;
+
+   const auto now = d.head_block_time();
+   if( ( now - market.last_funding_time ).to_seconds() < int64_t( market.options.funding_interval_sec ) )
+      return;
+
+   const share_type mark = *market.mark_price;
+
+   // The premium is measured against the book's mid. With one side empty there is no mid and
+   // therefore no premium: funding is skipped rather than guessed at, because a guessed
+   // funding rate transfers real money between real people.
+   const auto& book = d.get_index_type<futures_order_index>().indices().get<by_market_book>();
+   auto bid_end   = book.upper_bound( boost::make_tuple( market.get_id(), true ) );
+   const auto bid_begin = book.lower_bound( boost::make_tuple( market.get_id(), true ) );
+   auto ask_itr   = book.lower_bound( boost::make_tuple( market.get_id(), false ) );
+   const auto ask_end   = book.upper_bound( boost::make_tuple( market.get_id(), false ) );
+
+   share_type per_contract = 0;
+   if( bid_end != bid_begin && ask_itr != ask_end )
+   {
+      --bid_end;
+      const share_type mid = ( bid_end->price_per_contract + ask_itr->price_per_contract ) / 2;
+      share_type premium = mid - mark;
+
+      // Cap the rate. An uncapped funding rate is a way to drain a position in one tick.
+      const share_type cap = futures_margin_required( share_type(1), mark,
+            uint16_t( market.options.max_funding_rate_ppm * GRAPHENE_100_PERCENT / 1000000 ) );
+      if( premium > cap )  premium = cap;
+      if( premium < -cap ) premium = -cap;
+      per_contract = premium;
+   }
+
+   d.modify( market, [&per_contract, now]( futures_market_object& m ) {
+      m.cumulative_funding += per_contract;
+      m.last_funding_time   = now;
+   } );
+}
+
+void_result futures_settle_evaluator::do_evaluate( const futures_settle_operation& op )
+{ try {
+   const database& d = db();
+   const auto now = d.head_block_time();
+
+   FC_ASSERT( HARDFORK_FUTURES_PASSED( now ), "Not allowed until the futures hardfork" );
+
+   _market = &op.market_id(d);
+   FC_ASSERT( !_market->is_perpetual(),
+              "A perpetual contract never expires and cannot be settled" );
+   FC_ASSERT( now >= *_market->expiry,
+              "Contract '${s}' does not expire until ${e}",
+              ("s", _market->symbol)("e", *_market->expiry) );
+   FC_ASSERT( _market->is_settled || _market->mark_price.valid(),
+              "Cannot settle: the oracle has no value to settle against" );
+
+   if( op.position_id.valid() )
+   {
+      _position = &(*op.position_id)(d);
+      FC_ASSERT( _position->market_id == op.market_id,
+                 "Position ${p} does not belong to market '${s}'",
+                 ("p", *op.position_id)("s", _market->symbol) );
+   }
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+void_result futures_settle_evaluator::do_apply( const futures_settle_operation& op ) const
+{ try {
+   database& d = db();
+
+   // The first caller after expiry fixes the price everyone settles against. Snapshotting once
+   // matters: settling each position against a moving oracle would hand different traders
+   // different prices for the same contract.
+   if( !_market->is_settled )
+   {
+      const share_type final_price = *_market->mark_price;
+      d.modify( *_market, [&final_price]( futures_market_object& m ) {
+         m.settlement_price = final_price;
+         m.is_settled       = true;
+      } );
+   }
+
+   if( nullptr == _position )
+      return void_result();
+
+   const share_type final_price = *_market->settlement_price;
+
+   apply_funding( d, *_market, *_position );
+
+   // Close at the settled price: exactly the flat-position payout, margin - entry_value, with
+   // the difference passing through the pool as any other close does.
+   const share_type final_entry = _position->size * final_price;
+   const share_type realised    = final_entry - _position->entry_value;
+   const share_type payout      = _position->margin + realised;
+   const share_type abs_size    = _position->abs_size();
+   const account_id_type owner  = _position->owner;
+
+   // Open interest counts contracts, and every contract is one long and one short, so it is
+   // tracked as the long side alone. Decrementing for both sides of a settled pair would take
+   // it negative -- as it did, to -10, before this condition existed.
+   const share_type oi_delta = _position->size > 0 ? abs_size : share_type( 0 );
+   d.modify( *_market, [&realised, &oi_delta]( futures_market_object& m ) {
+      m.insurance_fund -= realised;
+      m.open_interest  -= oi_delta;
+   } );
+
+   if( payout > 0 )
+      d.adjust_balance( owner, asset( payout, _market->collateral_asset ) );
+
+   d.remove( *_position );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

@@ -176,6 +176,22 @@ struct futures_fixture : database_fixture
       PUSH_TX( db, tx );
    }
 
+   void settle_market( futures_market_id_type mid, account_id_type who,
+                       const fc::ecc::private_key& key,
+                       const optional<futures_position_id_type>& pid = {} )
+   {
+      futures_settle_operation op;
+      op.payer       = who;
+      op.market_id   = mid;
+      op.position_id = pid;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
    const futures_position_object* position_of( futures_market_id_type mid, account_id_type who )
    {
       const auto& idx = db.get_index_type<futures_position_index>().indices()
@@ -1013,6 +1029,204 @@ BOOST_AUTO_TEST_CASE( a_short_is_liquidated_when_the_mark_rises )
    BOOST_CHECK_EQUAL( cpid(db).unrealized_pnl( 108 ).value, 0 );
 
    check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+BOOST_FIXTURE_TEST_SUITE( futures_settlement_tests, futures_fixture )
+
+/// A dated contract settles once, at a price snapshotted from the oracle, and every position
+/// closes against that same number.
+BOOST_AUTO_TEST_CASE( a_dated_contract_settles_everyone_at_one_price )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) ); fund( carol, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   const fc::time_point_sec expiry = db.head_block_time() + fc::days( 1 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, expiry, "BTC-DATED" );
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto bob_pos   = position_of( mid, bob_id )->get_id();
+   const auto carol_pos = position_of( mid, carol_id )->get_id();
+
+   // before expiry, settlement is refused
+   GRAPHENE_REQUIRE_THROW( settle_market( mid, alice_id, alice_private_key ), fc::exception );
+
+   // move past expiry with the mark at 110: bob is up 100, carol down 100
+   generate_blocks( expiry + 60 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 110 );
+
+   const auto bob_before   = db.get_balance( bob_id, core_id ).amount;
+   const auto carol_before = db.get_balance( carol_id, core_id ).amount;
+
+   settle_market( mid, alice_id, alice_private_key, bob_pos );
+   BOOST_CHECK( mid(db).is_settled );
+   BOOST_REQUIRE( mid(db).settlement_price.valid() );
+   BOOST_CHECK_EQUAL( mid(db).settlement_price->value, 110 );
+   BOOST_CHECK( nullptr == db.find( bob_pos ) );
+
+   // bob: 100 margin plus 100 profit
+   BOOST_CHECK_EQUAL( ( db.get_balance( bob_id, core_id ).amount - bob_before ).value, 200 );
+
+   // the price is fixed now, so a later oracle move cannot change what carol settles at
+   publish( oid, bob_id, bob_private_key, 500 );
+   BOOST_CHECK_EQUAL( mid(db).settlement_price->value, 110 );
+
+   settle_market( mid, alice_id, alice_private_key, carol_pos );
+   BOOST_CHECK( nullptr == db.find( carol_pos ) );
+   // carol: 100 margin less her 100 loss
+   BOOST_CHECK_EQUAL( ( db.get_balance( carol_id, core_id ).amount - carol_before ).value, 0 );
+
+   BOOST_CHECK_EQUAL( mid(db).open_interest.value, 0 );
+} FC_LOG_AND_RETHROW() }
+
+/// A settled market takes no further orders, and a perpetual can never be settled at all.
+BOOST_AUTO_TEST_CASE( settled_markets_stop_trading_and_perpetuals_never_settle )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) ); fund( carol, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   const auto perp = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP" );
+   GRAPHENE_REQUIRE_THROW( settle_market( perp, alice_id, alice_private_key ), fc::exception );
+
+   const fc::time_point_sec expiry = db.head_block_time() + fc::days( 1 );
+   const auto dated = make_market( alice_id, alice_private_key, oid, 1, expiry, "BTC-DATED" );
+
+   generate_blocks( expiry + 60 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   settle_market( dated, alice_id, alice_private_key );
+   BOOST_CHECK( dated(db).is_settled );
+   BOOST_CHECK( !dated(db).is_tradable( db.head_block_time() ) );
+   GRAPHENE_REQUIRE_THROW( place( dated, bob_id, bob_private_key, true, 100, 1 ), fc::exception );
+
+   // the perpetual is unaffected
+   BOOST_CHECK( perp(db).is_tradable( db.head_block_time() ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Funding moves value from longs to shorts when the book sits above the mark, and nets to
+/// zero across the market.
+BOOST_AUTO_TEST_CASE( funding_transfers_from_longs_to_shorts_when_the_book_is_above_the_mark )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;      // short, so a test can cross it
+   cop.options.max_funding_rate_ppm = 10000;   // 1% per interval
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // bob long 10, carol short 10, both at the mark
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto bob_pos   = position_of( mid, bob_id )->get_id();
+   const auto carol_pos = position_of( mid, carol_id )->get_id();
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 0 );
+
+   // leave a book strictly above the mark: bid 104, ask 108, mid 106 against a mark of 100
+   place( mid, dan_id, dan_private_key, true, 104, 1 );
+   place( mid, alice_id, alice_private_key, false, 108, 1 );
+
+   // cross a funding interval and refresh the mark
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   // premium is 6 per contract, capped at 1% of the 100 mark = 1
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 1 );
+
+   const auto bob_margin_before   = bob_pos(db).margin;
+   const auto carol_margin_before = carol_pos(db).margin;
+
+   // touching each position applies the accrued funding
+   adjust_margin( bob_pos, bob_id, bob_private_key, 1000 );
+   adjust_margin( carol_pos, carol_id, carol_private_key, 1000 );
+
+   // bob is long 10 and pays 10; carol is short 10 and receives 10
+   BOOST_CHECK_EQUAL( ( bob_pos(db).margin - bob_margin_before ).value, 1000 - 10 );
+   BOOST_CHECK_EQUAL( ( carol_pos(db).margin - carol_margin_before ).value, 1000 + 10 );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+/// With one side of the book empty there is no mid, so no funding is charged. Guessing a
+/// funding rate would move real money on a made-up number.
+BOOST_AUTO_TEST_CASE( no_funding_accrues_without_a_two_sided_book )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) ); fund( carol, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // only bids rest
+   place( mid, bob_id, bob_private_key, true, 104, 1 );
+
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 0 );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

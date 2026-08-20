@@ -143,7 +143,8 @@ namespace graphene { namespace protocol {
             /* 85 */ futures_order_cancel_operation,
             /* 86 */ futures_fill_operation,          // VIRTUAL
             /* 87 */ futures_position_adjust_margin_operation,
-            /* 88 */ futures_liquidate_operation
+            /* 88 */ futures_liquidate_operation,
+            /* 89 */ futures_settle_operation
          >;
 
    /**
