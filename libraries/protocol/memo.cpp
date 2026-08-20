@@ -195,8 +195,7 @@ void pack_memo_data_impl( Stream& s, const graphene::protocol::memo_data& v, uin
    fc::raw::pack( s, v.to, _max_depth );
    fc::raw::pack( s, v.nonce, _max_depth );
    fc::raw::pack( s, v.message, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.pq_ciphertext, _max_depth );
+   fc::raw::pack( s, v.pq_ciphertext, _max_depth );   // gates itself; see fc::pq_gated
 }
 
 template<typename Stream>
@@ -208,10 +207,7 @@ void unpack_memo_data_impl( Stream& s, graphene::protocol::memo_data& v, uint32_
    fc::raw::unpack( s, v.to, _max_depth );
    fc::raw::unpack( s, v.nonce, _max_depth );
    fc::raw::unpack( s, v.message, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.pq_ciphertext, _max_depth );
-   else
-      v.pq_ciphertext.reset();
+   fc::raw::unpack( s, v.pq_ciphertext, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking memo_data" ) }
 
 } // namespace detail

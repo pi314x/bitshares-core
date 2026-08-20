@@ -67,8 +67,7 @@ void pack_witness_create_impl( Stream& s, const graphene::protocol::witness_crea
    fc::raw::pack( s, v.witness_account, _max_depth );
    fc::raw::pack( s, v.url, _max_depth );
    fc::raw::pack( s, v.block_signing_key, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.block_pq_signing_key, _max_depth );
+   fc::raw::pack( s, v.block_pq_signing_key, _max_depth );   // gates itself; see fc::pq_gated
 }
 
 template<typename Stream>
@@ -81,10 +80,7 @@ void unpack_witness_create_impl( Stream& s, graphene::protocol::witness_create_o
    fc::raw::unpack( s, v.witness_account, _max_depth );
    fc::raw::unpack( s, v.url, _max_depth );
    fc::raw::unpack( s, v.block_signing_key, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.block_pq_signing_key, _max_depth );
-   else
-      v.block_pq_signing_key.reset();
+   fc::raw::unpack( s, v.block_pq_signing_key, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking witness_create_operation" ) }
 
 template<typename Stream>
@@ -98,8 +94,7 @@ void pack_witness_update_impl( Stream& s, const graphene::protocol::witness_upda
    fc::raw::pack( s, v.witness_account, _max_depth );
    fc::raw::pack( s, v.new_url, _max_depth );
    fc::raw::pack( s, v.new_signing_key, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.new_pq_signing_key, _max_depth );
+   fc::raw::pack( s, v.new_pq_signing_key, _max_depth );   // gates itself; see fc::pq_gated
 }
 
 template<typename Stream>
@@ -113,10 +108,7 @@ void unpack_witness_update_impl( Stream& s, graphene::protocol::witness_update_o
    fc::raw::unpack( s, v.witness_account, _max_depth );
    fc::raw::unpack( s, v.new_url, _max_depth );
    fc::raw::unpack( s, v.new_signing_key, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.new_pq_signing_key, _max_depth );
-   else
-      v.new_pq_signing_key.reset();
+   fc::raw::unpack( s, v.new_pq_signing_key, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking witness_update_operation" ) }
 
 } // namespace detail

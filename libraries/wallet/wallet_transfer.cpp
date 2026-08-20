@@ -75,7 +75,7 @@ namespace graphene { namespace wallet { namespace detail {
             // sender needs no new key material of their own to encapsulate, so there is nothing
             // to opt into and no reason to leave the weaker option as the default.
             encrypt_memo_message( *xfer_op.memo, get_private_key(from_account.options.memo_key),
-                                  to_account.options.pq_memo_key, memo );
+                                  to_account.options.pq_memo_key.value, memo );
          }
 
       signed_transaction tx;
@@ -112,7 +112,7 @@ namespace graphene { namespace wallet { namespace detail {
             data.from = from_acct.options.memo_key;
             data.to = to_acct.options.memo_key;
             encrypt_memo_message( data, get_private_key(from_acct.options.memo_key),
-                                  to_acct.options.pq_memo_key, memo );
+                                  to_acct.options.pq_memo_key.value, memo );
             create_op.extensions.value.memo = data;
          }
 

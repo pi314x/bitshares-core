@@ -160,8 +160,7 @@ void pack_signed_block_header_impl( Stream& s, const graphene::protocol::signed_
    --_max_depth;
    fc::raw::pack( s, static_cast<const graphene::protocol::block_header&>(v), _max_depth );
    fc::raw::pack( s, v.witness_signature, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::pack( s, v.witness_pq_signature, _max_depth );
+   fc::raw::pack( s, v.witness_pq_signature, _max_depth );   // gates itself; see fc::pq_gated
 }
 
 template<typename Stream>
@@ -171,10 +170,7 @@ void unpack_signed_block_header_impl( Stream& s, graphene::protocol::signed_bloc
    --_max_depth;
    fc::raw::unpack( s, static_cast<graphene::protocol::block_header&>(v), _max_depth );
    fc::raw::unpack( s, v.witness_signature, _max_depth );
-   if( fc::raw::get_pq_format() == fc::raw::pq_format::current )
-      fc::raw::unpack( s, v.witness_pq_signature, _max_depth );
-   else
-      v.witness_pq_signature.reset();
+   fc::raw::unpack( s, v.witness_pq_signature, _max_depth );
 } FC_RETHROW_EXCEPTIONS( warn, "error unpacking signed_block_header" ) }
 
 template<typename Stream>
