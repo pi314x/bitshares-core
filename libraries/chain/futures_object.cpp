@@ -48,4 +48,24 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::futures_market_object, (graphen
                     (is_settled)
                   )
 
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::futures_position_object, (graphene::db::object),
+                    (owner)
+                    (market_id)
+                    (size)
+                    (entry_value)
+                    (margin)
+                    (last_cumulative_funding)
+                  )
+
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::futures_order_object, (graphene::db::object),
+                    (owner)
+                    (market_id)
+                    (is_long)
+                    (price_per_contract)
+                    (size)
+                    (deferred_margin)
+                  )
+
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::futures_market_object )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::futures_position_object )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::futures_order_object )

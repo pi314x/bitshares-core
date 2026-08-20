@@ -24,6 +24,7 @@
 #include <graphene/protocol/futures.hpp>
 
 #include <fc/io/raw.hpp>
+#include <fc/uint128.hpp>
 
 namespace graphene { namespace protocol {
 
@@ -121,6 +122,25 @@ share_type futures_market_update_operation::calculate_fee( const fee_params_t& s
    return core_fee_required;
 }
 
+void futures_order_create_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( size > 0, "Order size must be positive" );
+   FC_ASSERT( price_per_contract > 0, "Price per contract must be positive" );
+   // Notional is size x price, and it must stay inside the share range so that margin,
+   // entry_value and PnL cannot overflow anywhere downstream.
+   FC_ASSERT( size <= GRAPHENE_MAX_SHARE_SUPPLY, "Order size is out of range" );
+   FC_ASSERT( price_per_contract <= GRAPHENE_MAX_SHARE_SUPPLY, "Price is out of range" );
+   FC_ASSERT( fc::uint128_t( size.value ) * price_per_contract.value
+              <= fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ),
+              "Order notional (size x price) exceeds ${m}", ("m", GRAPHENE_MAX_SHARE_SUPPLY) );
+}
+
+void futures_order_cancel_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_options )
@@ -130,3 +150,11 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
       graphene::protocol::futures_market_update_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_create_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_update_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_order_create_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_order_cancel_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_create_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_cancel_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operation )

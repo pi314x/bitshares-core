@@ -73,7 +73,10 @@ struct hardfork_visitor {
                                           protocol::oracle_delete_operation,
                                           protocol::oracle_publish_operation >;
    using futures_ops = fc::typelist::list< protocol::futures_market_create_operation,
-                                           protocol::futures_market_update_operation >;
+                                           protocol::futures_market_update_operation,
+                                           protocol::futures_order_create_operation,
+                                           protocol::futures_order_cancel_operation,
+                                           protocol::futures_fill_operation >;
 
    fc::time_point_sec now;
 

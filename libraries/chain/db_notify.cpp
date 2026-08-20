@@ -412,6 +412,18 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // owner
    }
+   void operator()( const futures_order_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const futures_order_cancel_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const futures_fill_operation& op )
+   {
+      _impacted.insert( op.account_id );
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );
@@ -538,6 +550,14 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
            break;
         } case futures_market_object_type:{
            const auto* aobj = dynamic_cast<const futures_market_object*>( obj );
+           accounts.insert( aobj->owner );
+           break;
+        } case futures_position_object_type:{
+           const auto* aobj = dynamic_cast<const futures_position_object*>( obj );
+           accounts.insert( aobj->owner );
+           break;
+        } case futures_order_object_type:{
+           const auto* aobj = dynamic_cast<const futures_order_object*>( obj );
            accounts.insert( aobj->owner );
            break;
         } case oracle_object_type:{

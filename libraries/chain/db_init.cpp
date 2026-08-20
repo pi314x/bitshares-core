@@ -159,6 +159,8 @@ void database::initialize_evaluators()
    register_evaluator<oracle_publish_evaluator>();
    register_evaluator<futures_market_create_evaluator>();
    register_evaluator<futures_market_update_evaluator>();
+   register_evaluator<futures_order_create_evaluator>();
+   register_evaluator<futures_order_cancel_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -190,6 +192,8 @@ void database::initialize_indexes()
    add_index< primary_index<credit_deal_index> >();
    add_index< primary_index<oracle_index> >();
    add_index< primary_index<futures_market_index> >();
+   add_index< primary_index<futures_position_index> >();
+   add_index< primary_index<futures_order_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();
