@@ -147,6 +147,88 @@ namespace graphene { namespace protocol {
       share_type      calculate_fee( const fee_params_t& k )const;
    };
 
+   /**
+    * @brief Places a limit order on a futures market.
+    * @ingroup operations
+    *
+    * Margin for the whole order is reserved when it is placed, not when it fills. An order
+    * that could not be paid for if it filled has no business resting on the book.
+    */
+   struct futures_order_create_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = GRAPHENE_BLOCKCHAIN_PRECISION / 2; };
+
+      asset                   fee;
+      account_id_type         owner;
+      futures_market_id_type  market_id;
+
+      /// true to buy contracts (go long), false to sell (go short)
+      bool                    is_long = true;
+
+      /// Integer collateral per contract. Never a ratio; see FUTURES-DESIGN.md.
+      share_type              price_per_contract;
+
+      /// Number of contracts.
+      share_type              size;
+
+      /// If true, any unfilled remainder is discarded rather than resting on the book.
+      bool                    fill_or_kill = false;
+
+      extensions_type         extensions;
+
+      account_id_type fee_payer()const { return owner; }
+      void            validate()const;
+   };
+
+   /**
+    * @brief Cancels a resting futures order, returning its reserved margin.
+    * @ingroup operations
+    */
+   struct futures_order_cancel_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = 0; };
+
+      asset                  fee;
+      account_id_type        owner;
+      futures_order_id_type  order_id;
+
+      extensions_type        extensions;
+
+      account_id_type fee_payer()const { return owner; }
+      void            validate()const;
+   };
+
+   /**
+    * @brief Virtual operation emitted when two futures orders match.
+    * @ingroup operations
+    *
+    * Never signed. It exists so history and block explorers can see what the chain did, the
+    * same reason fill_order_operation exists for spot.
+    */
+   struct futures_fill_operation : public base_operation
+   {
+      struct fee_params_t {};
+
+      futures_fill_operation(){}
+      futures_fill_operation( futures_market_id_type m, account_id_type a, bool l,
+                              share_type s, share_type p, bool maker )
+         : market_id(m), account_id(a), is_long(l), size(s), fill_price(p), is_maker(maker) {}
+
+      asset                  fee;   ///< always zero; virtual operations charge nothing
+      futures_market_id_type market_id;
+      account_id_type        account_id;
+      bool                   is_long = true;
+      share_type             size;
+      share_type             fill_price;
+      bool                   is_maker = true;
+
+      account_id_type fee_payer()const { return account_id; }
+      void            validate()const { FC_ASSERT( !"virtual operation" ); }
+
+      /// Virtual operations are not signed, so they are never charged.
+      share_type calculate_fee( const fee_params_t& )const { return 0; }
+   };
+
    /// @return whether @p symbol is acceptable as a futures market symbol
    bool is_valid_futures_symbol( const string& symbol );
 
@@ -167,6 +249,17 @@ FC_REFLECT( graphene::protocol::futures_market_create_operation,
 FC_REFLECT( graphene::protocol::futures_market_update_operation,
             (fee)(owner)(market_id)(new_description)(new_options)(extensions) )
 
+FC_REFLECT( graphene::protocol::futures_order_create_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::futures_order_cancel_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::futures_fill_operation::fee_params_t, )
+
+FC_REFLECT( graphene::protocol::futures_order_create_operation,
+            (fee)(owner)(market_id)(is_long)(price_per_contract)(size)(fill_or_kill)(extensions) )
+FC_REFLECT( graphene::protocol::futures_order_cancel_operation,
+            (fee)(owner)(order_id)(extensions) )
+FC_REFLECT( graphene::protocol::futures_fill_operation,
+            (fee)(market_id)(account_id)(is_long)(size)(fill_price)(is_maker) )
+
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_options )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
       graphene::protocol::futures_market_create_operation::fee_params_t )
@@ -174,3 +267,11 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
       graphene::protocol::futures_market_update_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_create_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_market_update_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_order_create_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION(
+      graphene::protocol::futures_order_cancel_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_create_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_order_cancel_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::futures_fill_operation )

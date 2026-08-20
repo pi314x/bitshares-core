@@ -136,10 +136,140 @@ using futures_market_multi_index_type = multi_index_container<
 using futures_market_index = generic_index<futures_market_object,
                                            futures_market_multi_index_type>;
 
+/**
+ *  @brief One account's position in one futures market.
+ *  @ingroup object
+ *
+ *  @ref size is signed: positive is long, negative short. @ref entry_value is the running sum
+ *  of size x fill price, not an average entry price, so that
+ *
+ *      unrealized pnl = size x mark - entry_value
+ *
+ *  is exact integer arithmetic and the two sides of a contract are exactly antisymmetric.
+ *  Across a whole market, Sum(size) and Sum(entry_value) are both identically zero -- see
+ *  FUTURES-DESIGN.md. That is the solvency invariant, and it is why nothing here divides.
+ */
+class futures_position_object : public abstract_object<futures_position_object, protocol_ids,
+                                                       futures_position_object_type>
+{
+   public:
+      account_id_type        owner;
+      futures_market_id_type market_id;
+
+      /// Signed contracts. Positive long, negative short. Never zero: a position that reaches
+      /// zero is paid out and removed.
+      share_type             size;
+
+      /// Running sum of size x fill price.
+      share_type             entry_value;
+
+      /// Collateral posted against this position.
+      share_type             margin;
+
+      /// Funding index when funding was last applied to this position.
+      share_type             last_cumulative_funding;
+
+      bool is_long()const { return size > 0; }
+
+      /// Absolute contract count, for margin requirements.
+      share_type abs_size()const { return size >= 0 ? size : -size; }
+
+      /// Unrealized PnL at @p mark. Exact: no division, no rounding.
+      share_type unrealized_pnl( share_type mark )const
+      { return size * mark - entry_value; }
+
+      /// Margin plus unrealized PnL: what the position is actually worth.
+      share_type equity( share_type mark )const
+      { return margin + unrealized_pnl( mark ); }
+};
+
+/**
+ *  @brief A resting limit order on a futures market.
+ *  @ingroup object
+ *
+ *  Margin for the whole order is reserved when it is placed. An order that could not be paid
+ *  for if it filled has no business sitting on the book.
+ */
+class futures_order_object : public abstract_object<futures_order_object, protocol_ids,
+                                                    futures_order_object_type>
+{
+   public:
+      account_id_type        owner;
+      futures_market_id_type market_id;
+      bool                   is_long = true;
+      share_type             price_per_contract;
+      share_type             size;              ///< contracts remaining
+      share_type             deferred_margin;   ///< reserved collateral, returned on cancel
+};
+
+struct by_position_owner;   ///< for API, and to find an account's position in a market
+struct by_market_owner;     ///< unique: one position per account per market
+struct by_market_book;      ///< the order book
+struct by_order_owner;      ///< for API
+
+using futures_position_multi_index_type = multi_index_container<
+   futures_position_object,
+   indexed_by<
+      ordered_unique< tag<by_id>, member< object, object_id_type, &object::id > >,
+      // One position per account per market. Isolated margin means a second position would be
+      // a second, independently liquidatable thing on the same market -- which is cross margin
+      // wearing a disguise.
+      ordered_unique< tag<by_market_owner>,
+         composite_key< futures_position_object,
+            member< futures_position_object, futures_market_id_type,
+                    &futures_position_object::market_id >,
+            member< futures_position_object, account_id_type, &futures_position_object::owner >
+         >
+      >,
+      ordered_unique< tag<by_position_owner>,
+         composite_key< futures_position_object,
+            member< futures_position_object, account_id_type, &futures_position_object::owner >,
+            member< object, object_id_type, &object::id >
+         >
+      >
+   >
+>;
+
+using futures_position_index = generic_index<futures_position_object,
+                                             futures_position_multi_index_type>;
+
+using futures_order_multi_index_type = multi_index_container<
+   futures_order_object,
+   indexed_by<
+      ordered_unique< tag<by_id>, member< object, object_id_type, &object::id > >,
+      // The book. Longs are scanned in reverse (highest bid first), shorts forward (lowest ask
+      // first); the id tiebreaker gives price-time priority, since ids increase with time.
+      ordered_unique< tag<by_market_book>,
+         composite_key< futures_order_object,
+            member< futures_order_object, futures_market_id_type,
+                    &futures_order_object::market_id >,
+            member< futures_order_object, bool, &futures_order_object::is_long >,
+            member< futures_order_object, share_type,
+                    &futures_order_object::price_per_contract >,
+            member< object, object_id_type, &object::id >
+         >
+      >,
+      ordered_unique< tag<by_order_owner>,
+         composite_key< futures_order_object,
+            member< futures_order_object, account_id_type, &futures_order_object::owner >,
+            member< object, object_id_type, &object::id >
+         >
+      >
+   >
+>;
+
+using futures_order_index = generic_index<futures_order_object, futures_order_multi_index_type>;
+
 } } // graphene::chain
 
 MAP_OBJECT_ID_TO_TYPE( graphene::chain::futures_market_object )
+MAP_OBJECT_ID_TO_TYPE( graphene::chain::futures_position_object )
+MAP_OBJECT_ID_TO_TYPE( graphene::chain::futures_order_object )
 
 FC_REFLECT_TYPENAME( graphene::chain::futures_market_object )
+FC_REFLECT_TYPENAME( graphene::chain::futures_position_object )
+FC_REFLECT_TYPENAME( graphene::chain::futures_order_object )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::futures_market_object )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::futures_position_object )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::futures_order_object )
