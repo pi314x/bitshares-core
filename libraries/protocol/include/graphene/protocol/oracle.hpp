@@ -36,6 +36,10 @@ namespace graphene { namespace protocol {
    /// growing with age or publication rate.
    constexpr uint16_t GRAPHENE_ORACLE_MAX_HISTORY = 64;
 
+   /// Upper bound on how many market-issued assets may bind to one oracle. Publishing
+   /// refreshes every bound asset's feed, so this bounds the work a single publish can cause.
+   constexpr uint16_t GRAPHENE_ORACLE_MAX_SUBSCRIBERS = 64;
+
    constexpr size_t GRAPHENE_ORACLE_MIN_NAME_LENGTH = 3;
    constexpr size_t GRAPHENE_ORACLE_MAX_NAME_LENGTH = 32;
    constexpr size_t GRAPHENE_ORACLE_MAX_DESCRIPTION_LENGTH = 1000;
