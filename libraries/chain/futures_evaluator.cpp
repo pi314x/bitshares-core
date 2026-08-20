@@ -331,6 +331,14 @@ void record_fill( database& d, const futures_market_object& market, account_id_t
 
 } // namespace
 
+share_type futures_ppm_of( share_type amount, uint32_t ppm )
+{
+   // Rounded up, so a cap or a fee is never silently zero for small inputs.
+   const fc::uint128_t v = ( fc::uint128_t( amount.value ) * ppm + 999999 ) / 1000000;
+   FC_ASSERT( v <= fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ), "ppm result is out of range" );
+   return share_type( static_cast<int64_t>( v ) );
+}
+
 share_type futures_margin_required( share_type size, share_type price, uint16_t ratio )
 {
    // Round up. A requirement rounded down would let a position open slightly
@@ -689,8 +697,12 @@ void accrue_futures_funding( database& d, const futures_market_object& market )
       share_type premium = mid - mark;
 
       // Cap the rate. An uncapped funding rate is a way to drain a position in one tick.
-      const share_type cap = futures_margin_required( share_type(1), mark,
-            uint16_t( market.options.max_funding_rate_ppm * GRAPHENE_100_PERCENT / 1000000 ) );
+      //
+      // Computed in ppm directly rather than by converting to GRAPHENE_100_PERCENT units
+      // first: that conversion is an integer divide by 100, so every cap below 100 ppm
+      // collapsed to zero and silently switched funding off altogether, and the 750 ppm
+      // default lost its fractional part. Rounded up, as every requirement here is.
+      const share_type cap = futures_ppm_of( mark, market.options.max_funding_rate_ppm );
       if( premium > cap )  premium = cap;
       if( premium < -cap ) premium = -cap;
       per_contract = premium;
