@@ -35,6 +35,7 @@
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/futures_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
 #include <graphene/chain/ticket_object.hpp>
@@ -996,6 +997,60 @@ class database_api
             const optional<uint32_t>& limit = optional<uint32_t>(),
             const optional<oracle_id_type>& start_id = optional<oracle_id_type>() )const;
 
+      /////////////
+      // Futures //
+      /////////////
+
+      /**
+       * @brief Get a list of futures markets by ID
+       * @param market_ids IDs of the markets to retrieve
+       * @return The markets; an empty slot for any ID that is not a futures market
+       */
+      vector<optional<futures_market_object>> get_futures_markets(
+            const vector<futures_market_id_type>& market_ids )const;
+
+      /**
+       * @brief Get a futures market by its symbol
+       * @param symbol the contract symbol, e.g. "BTC-PERP"
+       * @return The market, or null if there is no such contract
+       */
+      optional<futures_market_object> get_futures_market_by_symbol(
+            const string& symbol )const;
+
+      /**
+       * @brief Get a list of futures markets
+       * @param limit maximum number to return, not greater than @a api_limit_get_futures
+       * @param start_id fetch markets whose IDs are greater than or equal to this ID
+       */
+      vector<futures_market_object> list_futures_markets(
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<futures_market_id_type>& start_id
+                  = optional<futures_market_id_type>() )const;
+
+      /**
+       * @brief Get the open futures positions of an account
+       * @param account_name_or_id name or ID of the account
+       * @param limit maximum number to return
+       * @param start_id fetch positions whose IDs are greater than or equal to this ID
+       */
+      vector<futures_position_object> get_futures_positions_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<futures_position_id_type>& start_id
+                  = optional<futures_position_id_type>() )const;
+
+      /**
+       * @brief Get the resting futures orders of an account
+       * @param account_name_or_id name or ID of the account
+       * @param limit maximum number to return
+       * @param start_id fetch orders whose IDs are greater than or equal to this ID
+       */
+      vector<futures_order_object> get_futures_orders_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<futures_order_id_type>& start_id
+                  = optional<futures_order_id_type>() )const;
+
       /**
        * @brief Get a list of credit offers by the name or ID of the owner account
        * @param account_name_or_id name or ID of the owner account
@@ -1610,6 +1665,11 @@ FC_API(graphene::app::database_api,
    (get_oracle_by_name)
    (list_oracles)
    (get_oracles_by_owner)
+   (get_futures_markets)
+   (get_futures_market_by_symbol)
+   (list_futures_markets)
+   (get_futures_positions_by_owner)
+   (get_futures_orders_by_owner)
    (get_credit_offers_by_asset)
    (list_credit_deals)
    (get_credit_deals_by_offer_id)

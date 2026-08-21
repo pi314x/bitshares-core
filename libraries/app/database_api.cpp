@@ -2133,6 +2133,78 @@ vector<oracle_object> database_api::get_oracles_by_owner(
                                   idx, limit, start_id, owner );
 }
 
+//////////////////////////////////////////////////////////////////////
+//                                                                  //
+// Futures                                                          //
+//                                                                  //
+//////////////////////////////////////////////////////////////////////
+
+vector<optional<futures_market_object>> database_api::get_futures_markets(
+            const vector<futures_market_id_type>& market_ids )const
+{
+   const auto& idx = my->_db.get_index_type<futures_market_index>().indices().get<by_id>();
+   vector<optional<futures_market_object>> result;
+   result.reserve( market_ids.size() );
+   std::transform( market_ids.begin(), market_ids.end(), std::back_inserter(result),
+                   [&idx]( futures_market_id_type id ) -> optional<futures_market_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<futures_market_object> database_api::get_futures_market_by_symbol(
+            const string& symbol )const
+{
+   const auto& idx = my->_db.get_index_type<futures_market_index>().indices()
+                        .get<by_futures_symbol>();
+   auto itr = idx.find( symbol );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
+vector<futures_market_object> database_api::list_futures_markets(
+            const optional<uint32_t>& limit,
+            const optional<futures_market_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<futures_market_index>().indices().get<by_id>();
+   return my->get_objects_by_x< futures_market_object,
+                                futures_market_id_type
+                               >( &application_options::api_limit_get_futures,
+                                  idx, limit, start_id );
+}
+
+vector<futures_position_object> database_api::get_futures_positions_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<futures_position_id_type>& start_id )const
+{
+   account_id_type owner = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<futures_position_index>().indices()
+                        .get<by_position_owner>();
+   return my->get_objects_by_x< futures_position_object,
+                                futures_position_id_type
+                               >( &application_options::api_limit_get_futures,
+                                  idx, limit, start_id, owner );
+}
+
+vector<futures_order_object> database_api::get_futures_orders_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<futures_order_id_type>& start_id )const
+{
+   account_id_type owner = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<futures_order_index>().indices()
+                        .get<by_order_owner>();
+   return my->get_objects_by_x< futures_order_object,
+                                futures_order_id_type
+                               >( &application_options::api_limit_get_futures,
+                                  idx, limit, start_id, owner );
+}
+
 vector<credit_offer_object> database_api::get_credit_offers_by_asset(
             const std::string& asset_symbol_or_id,
             const optional<uint32_t>& limit,
