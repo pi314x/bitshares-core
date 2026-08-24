@@ -299,25 +299,36 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
    const auto& bound_oracle = bitasset.options.extensions.value.price_oracle_id;
    const bool oracle_bound = bound_oracle.valid();
    optional<price> oracle_value;
+   // Defaults to head time so an absent value still produces a feed stamped "now", which is
+   // the same unusable-but-current state the legacy path reaches with too few publishers.
+   time_point_sec oracle_value_time = head_time;
    if( oracle_bound )
    {
       const oracle_object* o = find( *bound_oracle );
       // A bound oracle cannot be deleted (oracle_delete refuses while subscribers remain), but
       // read defensively: a missing oracle means "no value", never a stale or invented one.
-      if( nullptr != o )
+      //
+      // Freshness is checked HERE rather than trusted from current_value, because that field
+      // is only recomputed when a producer publishes. An oracle whose producers all stopped
+      // keeps its last aggregate for ever, so asking is_value_live is the only thing that
+      // distinguishes a current price from one that expired months ago.
+      if( nullptr != o && o->is_value_live( head_time ) )
+      {
          oracle_value = o->current_value;
+         oracle_value_time = o->current_value_time;
+      }
    }
 
    // We need to update the database
    modify( bitasset, [this, skip_median_update, &head_time, &new_current_feed_price, &bsrm,
-                      oracle_bound, &oracle_value]
+                      oracle_bound, &oracle_value, oracle_value_time]
                      ( asset_bitasset_data_object& abdo )
    {
       if( !skip_median_update )
       {
          const auto& maint_time = get_dynamic_global_properties().next_maintenance_time;
          if( oracle_bound )
-            abdo.update_feed_from_oracle( head_time, oracle_value );
+            abdo.update_feed_from_oracle( oracle_value_time, oracle_value );
          else
             abdo.update_median_feeds( head_time, maint_time );
          abdo.current_feed = abdo.median_feed;
