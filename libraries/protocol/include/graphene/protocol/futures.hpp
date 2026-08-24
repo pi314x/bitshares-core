@@ -74,12 +74,19 @@ namespace graphene { namespace protocol {
        * Per second rather than per update, because updates happen on oracle publishes: a
        * per-update limit would let a producer walk the mark as fast as they cared to publish.
        *
-       * Left at zero by default deliberately. Switching it on changes the price every existing
-       * position is measured against, and the right value depends entirely on the volatility
-       * of the underlying -- 50 ppm/s suits a stablecoin pair and would badly lag BTC. That is
-       * a per-market decision, not one to make silently on everybody's behalf.
+       * Defaults to 0.1% per second, which is chosen rather than inherited:
+       *
+       *   a one-block spike (5s) is clipped to 0.5%, so flashing a print is useless;
+       *   a genuine 10% move is fully priced in within 100 seconds;
+       *   the allowance over a minute is 6%, which tracks real crypto volatility.
+       *
+       * Tighter and liquidations lag a real crash badly, leaving bad debt for the insurance
+       * fund; looser and a single print still repricing everything. Zero disables the limit
+       * entirely, which an owner may choose for a market whose oracle they already trust to
+       * aggregate -- but it must be a choice, because the unprotected case is the dangerous
+       * one and a default of zero would have made it the common one.
        */
-      uint32_t max_mark_move_ppm = 0;
+      uint32_t max_mark_move_ppm = 1000;
 
       /// Perpetuals only, ignored by dated contracts.
       uint32_t funding_interval_sec = 28800;   // 8 hours, the common venue default

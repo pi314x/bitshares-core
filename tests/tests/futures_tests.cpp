@@ -226,6 +226,19 @@ struct futures_fixture : database_fixture
       BOOST_CHECK_EQUAL( long_contracts.value, mid(db).open_interest.value );
    }
 
+   /// Market options with the mark limit switched off.
+   ///
+   /// The limit is ON by default, which is the point of it. Tests about liquidation, funding
+   /// or the oracle-to-mark conversion need the mark to actually REACH a price, and leaving
+   /// damping on would quietly make them tests of damping instead. Disabling it here isolates
+   /// what each one is for; damping has its own tests.
+   static futures_market_options undamped()
+   {
+      futures_market_options o;
+      o.max_mark_move_ppm = 0;
+      return o;
+   }
+
    futures_market_id_type make_market( account_id_type owner, const fc::ecc::private_key& key,
                                        oracle_id_type oid, share_type contract_size,
                                        const optional<time_point_sec>& expiry = {},
@@ -292,7 +305,7 @@ BOOST_AUTO_TEST_CASE( the_mark_price_comes_from_the_oracle_and_the_contract_size
    publish( oid, bob_id, bob_private_key, 50000 );   // 1 BTC = 50000 CORE
 
    // a contract worth 10 units of the base asset
-   const auto mid = make_market( alice_id, alice_private_key, oid, 10 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 10, {}, "BTC-PERP", undamped() );
 
    BOOST_REQUIRE( mid(db).mark_price.valid() );
    BOOST_CHECK_EQUAL( mid(db).mark_price->value, 500000 );   // 10 x 50000
@@ -540,8 +553,37 @@ BOOST_AUTO_TEST_CASE( the_mark_is_rate_limited_when_a_limit_is_set )
    BOOST_CHECK_EQUAL( mid(db).mark_price->value, 110000 );
 } FC_LOG_AND_RETHROW() }
 
-/// Off by default: a market that sets no limit tracks the oracle exactly, as before.
-BOOST_AUTO_TEST_CASE( the_mark_is_undamped_when_no_limit_is_set )
+/// An owner may switch the limit off, and then the mark tracks the oracle exactly. This is
+/// the deliberate opt-out, not the default -- see the default asserted below.
+BOOST_AUTO_TEST_CASE( the_mark_is_undamped_when_the_limit_is_switched_off )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100000 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP", undamped() );
+   BOOST_CHECK_EQUAL( mid(db).options.max_mark_move_ppm, 0u );
+
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 200000 );
+   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 200000 );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * The default is ON, and it is a specific number rather than whatever fell out.
+ *
+ * 1000 ppm/s clips a one-block spike to 0.5%, prices a genuine 10% move in within 100 seconds,
+ * and allows 6% over a minute. Tighter and liquidations lag a real crash, leaving bad debt;
+ * looser and a single print still reprices everything. A market that opts out has to say so.
+ */
+BOOST_AUTO_TEST_CASE( a_market_is_rate_limited_by_default )
 { try {
    generate_blocks( HARDFORK_FUTURES_TIME );
    generate_block();
@@ -554,12 +596,17 @@ BOOST_AUTO_TEST_CASE( the_mark_is_undamped_when_no_limit_is_set )
    const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
    publish( oid, bob_id, bob_private_key, 100000 );
    const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
-   BOOST_CHECK_EQUAL( mid(db).options.max_mark_move_ppm, 0u );
 
+   BOOST_CHECK_EQUAL( mid(db).options.max_mark_move_ppm, 1000u );
+
+   // A market created without saying anything about it is protected: a doubling print does
+   // not become the price every position is measured against.
    generate_block();
    set_expiration( db, trx );
    publish( oid, bob_id, bob_private_key, 200000 );
-   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 200000 );
+   BOOST_CHECK_MESSAGE( mid(db).mark_price->value < 101000,
+                        "the default did not damp: mark went to "
+                        << mid(db).mark_price->value );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()
@@ -1079,7 +1126,7 @@ BOOST_AUTO_TEST_CASE( an_underwater_position_is_liquidated_and_handed_to_the_liq
 
    const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
    publish( oid, bob_id, bob_private_key, 100 );
-   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP", undamped() );
 
    // bob long 10 @ 100 with 100 margin, 10x leverage
    place( mid, bob_id, bob_private_key, true, 100, 10 );
@@ -1196,7 +1243,7 @@ BOOST_AUTO_TEST_CASE( a_short_is_liquidated_when_the_mark_rises )
 
    const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
    publish( oid, bob_id, bob_private_key, 100 );
-   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP", undamped() );
 
    place( mid, bob_id, bob_private_key, true, 100, 10 );
    place( mid, carol_id, carol_private_key, false, 100, 10 );
@@ -1303,7 +1350,7 @@ BOOST_AUTO_TEST_CASE( a_liquidator_may_already_hold_a_position_in_the_market )
 
    const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
    publish( oid, bob_id, bob_private_key, 100 );
-   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP", undamped() );
 
    // bob long 10 against carol; dan long 4 against alice, so dan already holds a position
    place( mid, bob_id,   bob_private_key,   true,  100, 10 );
@@ -1351,7 +1398,7 @@ BOOST_AUTO_TEST_CASE( liquidating_into_an_opposing_position_nets_open_interest_d
 
    const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
    publish( oid, bob_id, bob_private_key, 100 );
-   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP", undamped() );
 
    // bob long 10 against carol; dan SHORT 4 against alice
    place( mid, bob_id,   bob_private_key,   true,  100, 10 );
@@ -1409,6 +1456,7 @@ BOOST_AUTO_TEST_CASE( an_uncovered_bankruptcy_is_taken_from_the_winning_side )
    futures_market_options opts;
    opts.funding_interval_sec = 60;          // the minimum, so a tick is reachable
    opts.max_funding_rate_ppm = 10000;       // 1% of the mark per interval
+   opts.max_mark_move_ppm    = 0;           // this test is about the bankruptcy, not the mark
    const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-ADL", opts );
 
    // A LARGE long held by dan drives the fund deeply negative when he collects funding, while
