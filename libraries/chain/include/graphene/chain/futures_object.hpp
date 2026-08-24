@@ -83,6 +83,26 @@ class futures_market_object : public abstract_object<futures_market_object, prot
       share_type      cumulative_funding;
       time_point_sec  last_funding_time;
 
+      /**
+       * Time-weighted average premium over the current funding interval, in collateral per
+       * contract, and when it was last sampled.
+       *
+       * The premium must be averaged over the interval rather than read once at the end of it.
+       * A single instantaneous reading of the book mid is set by whichever two orders happen to
+       * be best at that instant, so on a thin book one non-marketable order placed just before
+       * the sample -- and cancelled just after -- moves the mid as far as the rate cap allows.
+       * That is a repeatable transfer from one side of the market to the other, every interval,
+       * for the price of an order that never fills.
+       *
+       * Weighting by time makes that cost real: to move the average you have to hold the quote
+       * for a meaningful share of the interval, during which anyone may trade against it.
+       */
+      share_type      premium_avg;
+      /// The most recent instantaneous observation, carried so the NEXT sample can weight the
+      /// span that just elapsed by the premium that was actually in force during it.
+      share_type      premium_last;
+      time_point_sec  last_premium_time;
+
       /// Holds liquidation penalties and rounding dust, and covers liquidation shortfalls.
       share_type      insurance_fund;
 

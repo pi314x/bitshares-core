@@ -22,6 +22,8 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/futures_evaluator.hpp>
+
+#include <boost/multiprecision/cpp_int.hpp>
 #include <graphene/chain/futures_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 
@@ -34,6 +36,11 @@
 #include <algorithm>
 
 namespace graphene { namespace chain {
+
+// Defined below; declared here because update_futures_mark_price samples the premium before
+// the interval is closed out, and both helpers depend on futures_ppm_of.
+share_type futures_ppm_of( share_type amount, uint32_t ppm );
+void accumulate_premium( database& d, const futures_market_object& market, share_type mark );
 
 void update_futures_mark_price( database& d, const futures_market_object& market )
 {
@@ -63,8 +70,12 @@ void update_futures_mark_price( database& d, const futures_market_object& market
       m.mark_price_time = now;
    } );
 
-   // A new mark is the natural moment to check whether a funding interval has elapsed: it is
-   // driven by the oracle, which publishes continuously, so no separate timer is needed.
+   // A new mark is the natural moment both to sample the premium and to check whether a
+   // funding interval has elapsed: it is driven by the oracle, which publishes continuously, so
+   // no separate timer is needed. Sampling must happen FIRST, so the span since the previous
+   // publish is folded in before the interval is closed out.
+   if( new_mark.valid() )
+      accumulate_premium( d, market, *new_mark );
    accrue_futures_funding( d, market );
 }
 
@@ -94,6 +105,77 @@ optional<share_type> live_mark_price( const database& d, const futures_market_ob
    if( nullptr == o || !o->is_value_live( d.head_block_time() ) )
       return {};
    return market.mark_price;
+}
+
+/// @return the instantaneous premium of the book's mid over the mark, clamped to the market's
+/// rate cap, or nothing when either side of the book is empty and there is therefore no mid.
+optional<share_type> sample_premium( const database& d, const futures_market_object& market,
+                                     share_type mark )
+{
+   const auto& book = d.get_index_type<futures_order_index>().indices().get<by_market_book>();
+   auto bid_end = book.upper_bound( boost::make_tuple( market.get_id(), true ) );
+   const auto bid_begin = book.lower_bound( boost::make_tuple( market.get_id(), true ) );
+   auto ask_itr = book.lower_bound( boost::make_tuple( market.get_id(), false ) );
+   const auto ask_end = book.upper_bound( boost::make_tuple( market.get_id(), false ) );
+
+   if( bid_end == bid_begin || ask_itr == ask_end )
+      return {};
+
+   --bid_end;
+   const share_type mid = ( bid_end->price_per_contract + ask_itr->price_per_contract ) / 2;
+   share_type premium = mid - mark;
+
+   // Clamp each SAMPLE, not just the final average. It bounds the average by construction, and
+   // it keeps the weighted sum below in range: an unclamped premium can be as large as the mark
+   // itself, and multiplying that by an interval's worth of seconds overflows.
+   const share_type cap = futures_ppm_of( mark, market.options.max_funding_rate_ppm );
+   if( premium > cap )  premium = cap;
+   if( premium < -cap ) premium = -cap;
+   return premium;
+}
+
+/**
+ * Fold the current premium into the interval's time-weighted average.
+ *
+ * Kept as a running average rather than a running sum on purpose: a sum of premium x seconds
+ * overflows int64 for a large mark over a long interval, whereas the average is bounded by the
+ * rate cap at every step. The weighting is done in 128-bit and divided straight back down.
+ */
+void accumulate_premium( database& d, const futures_market_object& market, share_type mark )
+{
+   const auto now = d.head_block_time();
+   const auto last = market.last_premium_time == time_point_sec()
+                   ? market.last_funding_time : market.last_premium_time;
+   const int64_t dt = ( now - last ).to_seconds();
+
+   const auto sampled = sample_premium( d, market, mark );
+   // No mid means no premium, which is a real observation of zero rather than a gap to be
+   // skipped: a market with an empty side is not exhibiting a premium.
+   const share_type sample = sampled.valid() ? *sampled : share_type( 0 );
+
+   if( dt <= 0 )
+   {
+      // Same second as the last look. Nothing elapsed to weight; just refresh the observation.
+      d.modify( market, [&sample]( futures_market_object& m ) { m.premium_last = sample; } );
+      return;
+   }
+
+   const int64_t before = ( last - market.last_funding_time ).to_seconds();
+
+   // The span that just elapsed carried the premium observed at its START, not the one being
+   // observed now. Weighting by the current sample would hand the whole span to whatever is on
+   // the book at this instant -- which is exactly the manipulation this is meant to prevent,
+   // reintroduced one level up.
+   const boost::multiprecision::int128_t weighted =
+         boost::multiprecision::int128_t( market.premium_avg.value ) * before
+       + boost::multiprecision::int128_t( market.premium_last.value ) * dt;
+   const share_type new_avg{ static_cast<int64_t>( weighted / ( before + dt ) ) };
+
+   d.modify( market, [&new_avg, &sample, now]( futures_market_object& m ) {
+      m.premium_avg       = new_avg;
+      m.premium_last      = sample;
+      m.last_premium_time = now;
+   } );
 }
 
 void update_futures_markets_for_oracle( database& d, const oracle_object& o )
@@ -406,6 +488,25 @@ void_result futures_order_create_evaluator::do_evaluate( const futures_order_cre
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
+/**
+ * Re-observe the premium because the book just changed.
+ *
+ * Sampling only when the oracle publishes leaves the observation stale between publishes: a
+ * book that forms and is charged for a whole interval would be weighted by whatever was in
+ * force before it existed. Sampling on every book change keeps the running observation honest,
+ * and costs an order placement one lookup.
+ *
+ * It also keeps the manipulation cost real in the other direction. A skewed quote is sampled
+ * the moment it is placed and again the moment it is withdrawn, so it earns weight for exactly
+ * as long as it was actually exposed to being traded against -- no more, and no less.
+ */
+void resample_premium( database& d, const futures_market_object& market )
+{
+   const auto live = live_mark_price( d, market );
+   if( live.valid() )
+      accumulate_premium( d, market, *live );
+}
+
 object_id_type futures_order_create_evaluator::do_apply( const futures_order_create_operation& op )
 { try {
    database& d = db();
@@ -526,12 +627,17 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
          o.size               = remaining;
          o.deferred_margin    = reserved;
       } );
+      // A new resting order changes the book, and so the premium in force from now on.
+      resample_premium( d, market );
       return order.id;
    }
 
    // Fully filled, or killed. Whatever margin was reserved and not used goes back.
    if( reserved > 0 )
       d.adjust_balance( op.owner, asset( reserved, market.collateral_asset ) );
+
+   // Fills consume resting orders, which moves the book just as surely as adding one.
+   resample_premium( d, market );
 
    return object_id_type();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -558,6 +664,9 @@ void_result futures_order_cancel_evaluator::do_apply( const futures_order_cancel
       d.adjust_balance( _order->owner,
                         asset( _order->deferred_margin, market.collateral_asset ) );
    d.remove( *_order );
+
+   // The book just changed, so the standing observation is out of date.
+   resample_premium( d, market );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -716,37 +825,24 @@ void accrue_futures_funding( database& d, const futures_market_object& market )
 
    const share_type mark = *live;
 
-   // The premium is measured against the book's mid. With one side empty there is no mid and
-   // therefore no premium: funding is skipped rather than guessed at, because a guessed
-   // funding rate transfers real money between real people.
-   const auto& book = d.get_index_type<futures_order_index>().indices().get<by_market_book>();
-   auto bid_end   = book.upper_bound( boost::make_tuple( market.get_id(), true ) );
-   const auto bid_begin = book.lower_bound( boost::make_tuple( market.get_id(), true ) );
-   auto ask_itr   = book.lower_bound( boost::make_tuple( market.get_id(), false ) );
-   const auto ask_end   = book.upper_bound( boost::make_tuple( market.get_id(), false ) );
-
-   share_type per_contract = 0;
-   if( bid_end != bid_begin && ask_itr != ask_end )
-   {
-      --bid_end;
-      const share_type mid = ( bid_end->price_per_contract + ask_itr->price_per_contract ) / 2;
-      share_type premium = mid - mark;
-
-      // Cap the rate. An uncapped funding rate is a way to drain a position in one tick.
-      //
-      // Computed in ppm directly rather than by converting to GRAPHENE_100_PERCENT units
-      // first: that conversion is an integer divide by 100, so every cap below 100 ppm
-      // collapsed to zero and silently switched funding off altogether, and the 750 ppm
-      // default lost its fractional part. Rounded up, as every requirement here is.
-      const share_type cap = futures_ppm_of( mark, market.options.max_funding_rate_ppm );
-      if( premium > cap )  premium = cap;
-      if( premium < -cap ) premium = -cap;
-      per_contract = premium;
-   }
+   // The time-weighted average premium observed across this interval, not a reading taken at
+   // the end of it. Each sample was already clamped to the rate cap, so the average is too;
+   // the clamp below is kept because the cap is a property of the rate, not of the sampler.
+   //
+   // The cap is computed in ppm directly rather than by converting to GRAPHENE_100_PERCENT
+   // units first: that conversion is an integer divide by 100, so every cap below 100 ppm
+   // collapsed to zero and silently switched funding off altogether.
+   share_type per_contract = market.premium_avg;
+   const share_type cap = futures_ppm_of( mark, market.options.max_funding_rate_ppm );
+   if( per_contract > cap )  per_contract = cap;
+   if( per_contract < -cap ) per_contract = -cap;
 
    d.modify( market, [&per_contract, now]( futures_market_object& m ) {
       m.cumulative_funding += per_contract;
       m.last_funding_time   = now;
+      // Start the next interval from a clean average, anchored at now.
+      m.premium_avg         = 0;
+      m.last_premium_time   = now;
    } );
 }
 
