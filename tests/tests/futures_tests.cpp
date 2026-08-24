@@ -965,6 +965,77 @@ BOOST_AUTO_TEST_CASE( a_momentary_quote_cannot_set_the_funding_rate )
    BOOST_CHECK_GT( held_funding.value, brief_funding.value );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * A market order is an aggressive limit with fill_or_kill, and that already works.
+ *
+ * There is no separate market-order operation and there does not need to be: the matching loop
+ * walks the book while size remains, fills at each MAKER's price, and fill_or_kill discards
+ * whatever is left rather than resting it. Price far through the book plus fill_or_kill is
+ * immediate-or-cancel against everything available, which is what a market order is.
+ *
+ * This is a demonstration rather than a change. It is here because "limit orders only" reads
+ * like a missing feature, and without a test saying otherwise the next person will build the
+ * operation that already exists.
+ */
+BOOST_AUTO_TEST_CASE( an_aggressive_fill_or_kill_order_sweeps_the_book_like_a_market_order )
+{
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
+   fund( carol, asset(100000000) ); fund( dan, asset(100000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, alice_id, "SWEEP.CORE" );
+   publish( oid, alice_id, alice_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-SWEEP",
+                                 undamped() );
+
+   // Three asks at rising prices, from two different makers.
+   place( mid, bob_id,   bob_private_key,   false, 100, 3 );
+   place( mid, carol_id, carol_private_key, false, 105, 3 );
+   place( mid, bob_id,   bob_private_key,   false, 110, 3 );
+
+   const auto dan_before = db.get_balance( dan_id, core_id ).amount;
+
+   // Far through the book, immediate-or-cancel: take everything offered, keep nothing resting.
+   const auto leftover = place( mid, dan_id, dan_private_key, true, 1000, 20, true );
+   BOOST_CHECK_MESSAGE( leftover == object_id_type(),
+                        "fill_or_kill left an order resting on the book" );
+
+   // Dan swept all nine contracts...
+   const auto* dan_pos = position_of( mid, dan_id );
+   BOOST_REQUIRE( nullptr != dan_pos );
+   BOOST_CHECK_EQUAL( dan_pos->size.value, 9 );
+
+   // entry_value sits at the MARK, not at the prices paid. apply_fill settles every fill to
+   // the mark as it happens, so buying above it realises the difference immediately rather
+   // than carrying it as unrealised PnL -- 9 contracts at a mark of 100.
+   BOOST_CHECK_EQUAL( dan_pos->entry_value.value, 9 * 100 );
+
+   // What proves he paid the MAKERS' prices rather than his own limit is the cost. Filling
+   // nine contracts at 1000 would have cost him an order of magnitude more than filling them
+   // across 100, 105 and 110; the difference above the mark is realised on the spot.
+   const auto dan_paid = dan_before - db.get_balance( dan_id, core_id ).amount;
+   BOOST_CHECK_MESSAGE( dan_paid.value < 9 * 1000 / 4,
+                        "the taker paid " << dan_paid.value
+                        << ", which looks like a fill at its own limit rather than the book's" );
+
+   // Both makers were filled, including the one priced highest.
+   BOOST_REQUIRE( nullptr != position_of( mid, bob_id ) );
+   BOOST_REQUIRE( nullptr != position_of( mid, carol_id ) );
+   BOOST_CHECK_EQUAL( position_of( mid, bob_id )->size.value, -6 );   // 3 at 100 and 3 at 110
+   BOOST_CHECK_EQUAL( position_of( mid, carol_id )->size.value, -3 );
+
+   // The book is empty and nothing of his order survived.
+   BOOST_CHECK_EQUAL( mid(db).open_interest.value, 9 );
+   BOOST_CHECK( db.get_balance( dan_id, core_id ).amount < dan_before );
+   check_market_is_balanced( mid );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
