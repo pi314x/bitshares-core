@@ -41,6 +41,9 @@ namespace graphene { namespace protocol {
 
    /// Per-interval funding cap. 1% of notional per interval is already extreme.
    constexpr uint32_t GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM = 10000;
+   /// 1% of notional. Well above any venue's taker fee, and low enough that a market
+   /// cannot be configured to consume a position through trading costs alone.
+   constexpr uint32_t GRAPHENE_FUTURES_MAX_TRADING_FEE_PPM = 10000;
 
    constexpr uint32_t GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC = 60;
 
@@ -87,6 +90,23 @@ namespace graphene { namespace protocol {
        * one and a default of zero would have made it the common one.
        */
       uint32_t max_mark_move_ppm = 1000;
+
+      /**
+       * Trading fees, in parts per million of the notional filled.
+       *
+       * The taker pays; the maker is paid `maker_rebate_ppm` of it and the remainder
+       * capitalises the insurance fund, which is what absorbs a bankruptcy before the winning
+       * side is asked to. Paying the maker is the point: resting an order is what gives the
+       * market a book to trade against, and a venue that charges both sides equally is asking
+       * for liquidity it declines to pay for.
+       *
+       * Both default to zero, and unlike max_mark_move_ppm that is the right default. A fee is
+       * not a safety control -- it is the operator's commercial choice, it changes what every
+       * trade costs, and a market that charges nothing is a coherent thing to run. The mark
+       * limit defaults ON because an unprotected market is dangerous; a free market is not.
+       */
+      uint32_t taker_fee_ppm = 0;
+      uint32_t maker_rebate_ppm = 0;
 
       /// Perpetuals only, ignored by dated contracts.
       uint32_t funding_interval_sec = 28800;   // 8 hours, the common venue default
@@ -343,6 +363,7 @@ namespace graphene { namespace protocol {
 
 FC_REFLECT( graphene::protocol::futures_market_options,
             (initial_margin_ratio)(maintenance_margin_ratio)(max_mark_move_ppm)
+            (taker_fee_ppm)(maker_rebate_ppm)
             (funding_interval_sec)(max_funding_rate_ppm)
             (liquidation_penalty_ratio)(enabled)(extensions) )
 

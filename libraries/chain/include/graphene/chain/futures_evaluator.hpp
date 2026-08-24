@@ -77,6 +77,8 @@ namespace graphene { namespace chain {
 
          const futures_market_object* _market = nullptr;
          share_type _required_margin;
+         /// Worst-case taker fee, reserved at the limit price and refunded unspent.
+         share_type _max_fee;
    };
 
    class futures_order_cancel_evaluator : public evaluator<futures_order_cancel_evaluator>
