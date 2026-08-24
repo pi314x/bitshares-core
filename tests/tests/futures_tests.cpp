@@ -1378,6 +1378,95 @@ BOOST_AUTO_TEST_CASE( liquidating_into_an_opposing_position_nets_open_interest_d
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * When the insurance fund cannot absorb a bankruptcy, the traders who profited do.
+ *
+ * The previous behaviour charged the uncovered remainder to whoever called the liquidation.
+ * That reads as fair and is self-defeating: nobody volunteers to buy a loss, so the bankrupt
+ * position is never liquidated, and it sits there while the market reports itself solvent.
+ *
+ * Reaching an insufficient fund takes some doing, and the route matters. Losses are booked
+ * into the fund by settle_to_mark BEFORE anything is drawn from it, so at the moment a loser
+ * is liquidated the fund normally holds their whole loss. The fund only runs short when it has
+ * already paid something out -- and funding does exactly that, because it is applied lazily
+ * per position: a receiver touched before the payers takes money the fund has not collected.
+ */
+BOOST_AUTO_TEST_CASE( an_uncovered_bankruptcy_is_taken_from_the_winning_side )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, dan_id, "ADL.CORE" );
+   publish( oid, dan_id, dan_private_key, 100 );
+
+   futures_market_options opts;
+   opts.funding_interval_sec = 60;          // the minimum, so a tick is reachable
+   opts.max_funding_rate_ppm = 10000;       // 1% of the mark per interval
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-ADL", opts );
+
+   // A LARGE long held by dan drives the fund deeply negative when he collects funding, while
+   // a small long held by alice is the one that goes bankrupt. Sizing matters: settling the
+   // loser credits the fund with their entire loss before anything is drawn, so socialisation
+   // only engages when the fund is more negative than the bankrupt position's own margin.
+   place( mid, dan_id,   dan_private_key,   true,  100, 2000 );
+   place( mid, bob_id,   bob_private_key,   false, 100, 2000 );
+   place( mid, alice_id, alice_private_key, true,  100, 10 );
+   place( mid, bob_id,   bob_private_key,   false, 100, 10 );
+   const auto alice_pos = position_of( mid, alice_id )->get_id();
+   const auto bob_pos   = position_of( mid, bob_id )->get_id();
+   const auto dan_pos   = position_of( mid, dan_id )->get_id();
+
+   // A book BELOW the mark makes the premium negative, so longs receive and shorts pay.
+   place( mid, carol_id, carol_private_key, true,  60, 1 );
+   place( mid, carol_id, carol_private_key, false, 70, 1 );
+
+   for( int i = 0; i < 30; ++i )
+   {
+      generate_block();
+      set_expiration( db, trx );
+      publish( oid, dan_id, dan_private_key, 100 );
+   }
+   BOOST_REQUIRE_LT( mid(db).cumulative_funding.value, 0 );   // longs are owed
+
+   // Touch ONLY the big receiver, so the fund pays out before it has collected from the payers.
+   adjust_margin( dan_pos, dan_id, dan_private_key, 1 );
+   BOOST_REQUIRE_LT( mid(db).insurance_fund.value, -100 );
+
+   // Now crash the mark so alice is bankrupt: 10 x 85 - 1000 = -150 against ~100 of margin.
+   publish( oid, dan_id, dan_private_key, 85 );
+   BOOST_REQUIRE_LT( alice_pos(db).equity( 85 ).value, 0 );
+
+   const auto bob_margin_before  = bob_pos(db).margin;
+   const auto carol_before       = db.get_balance( carol_id, core_id ).amount;
+   const auto fund_before        = mid(db).insurance_fund;
+   BOOST_REQUIRE( bob_pos(db).unrealized_pnl( 85 ) > 0 );     // bob profited from the crash
+
+   liquidate( alice_pos, carol_id, carol_private_key );
+
+   // bob gave some of his gain back...
+   BOOST_CHECK_MESSAGE( bob_pos(db).margin < bob_margin_before,
+                        "the winning side was not touched: bob still has "
+                        << bob_pos(db).margin.value );
+
+   // ...and carol was not made to buy the shortfall. She still paid to take the position on,
+   // but only the initial margin, not the bankruptcy.
+   const auto carol_paid = carol_before - db.get_balance( carol_id, core_id ).amount;
+   const auto haircut    = bob_margin_before - bob_pos(db).margin;
+   BOOST_CHECK_GT( haircut.value, 0 );
+   BOOST_TEST_MESSAGE( "fund before " << fund_before.value
+                       << ", haircut on the winner " << haircut.value
+                       << ", liquidator paid " << carol_paid.value );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
