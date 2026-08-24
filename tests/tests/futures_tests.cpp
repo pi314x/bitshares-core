@@ -1181,6 +1181,102 @@ BOOST_AUTO_TEST_CASE( a_stale_oracle_stops_marking_liquidating_and_settling )
    BOOST_CHECK( mid(db).is_settled );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * Regression: a liquidator who already holds a position in the same market.
+ *
+ * Positions are unique per (market, owner) and liquidation reassigned owner, so this collided
+ * on the index and took the node down with SIGABRT -- an ordinary operation aborting every
+ * node that processed the block. The liquidated position is merged into the existing one now.
+ *
+ * Both directions matter. Merging like signs just adds contracts. Merging opposite signs nets
+ * them off, which genuinely retires contracts and has to come out of open interest, or the
+ * market reports more open contracts than exist.
+ */
+BOOST_AUTO_TEST_CASE( a_liquidator_may_already_hold_a_position_in_the_market )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   // bob long 10 against carol; dan long 4 against alice, so dan already holds a position
+   place( mid, bob_id,   bob_private_key,   true,  100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   place( mid, dan_id,   dan_private_key,   true,  100, 4 );
+   place( mid, alice_id, alice_private_key, false, 100, 4 );
+
+   const auto pid = position_of( mid, bob_id )->get_id();
+   BOOST_REQUIRE( nullptr != position_of( mid, dan_id ) );
+   const auto oi_before = mid(db).open_interest;
+   BOOST_CHECK_EQUAL( oi_before.value, 14 );
+
+   // equity 20 against a maintenance requirement of 10 x 92 x 5% = 46
+   publish( oid, bob_id, bob_private_key, 92 );
+   BOOST_REQUIRE_EQUAL( pid(db).equity( 92 ).value, 20 );
+
+   liquidate( pid, dan_id, dan_private_key );
+
+   // Merged, not collided: one position, both sides' contracts, and bob's is gone.
+   BOOST_CHECK( nullptr == db.find( pid ) );
+   const auto* dan_pos = position_of( mid, dan_id );
+   BOOST_REQUIRE( nullptr != dan_pos );
+   BOOST_CHECK_EQUAL( dan_pos->size.value, 14 );
+
+   // Like signs, so nothing was retired.
+   BOOST_CHECK_EQUAL( mid(db).open_interest.value, oi_before.value );
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+/// The other direction: the liquidator's own position is on the OPPOSITE side, so taking the
+/// liquidated one over nets contracts off and open interest must fall to match.
+BOOST_AUTO_TEST_CASE( liquidating_into_an_opposing_position_nets_open_interest_down )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   // bob long 10 against carol; dan SHORT 4 against alice
+   place( mid, bob_id,   bob_private_key,   true,  100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   place( mid, alice_id, alice_private_key, true,  100, 4 );
+   place( mid, dan_id,   dan_private_key,   false, 100, 4 );
+
+   const auto pid = position_of( mid, bob_id )->get_id();
+   BOOST_REQUIRE( nullptr != position_of( mid, dan_id ) );
+   BOOST_REQUIRE_LT( position_of( mid, dan_id )->size.value, 0 );
+   BOOST_CHECK_EQUAL( mid(db).open_interest.value, 14 );
+
+   publish( oid, bob_id, bob_private_key, 92 );
+   BOOST_REQUIRE_EQUAL( pid(db).equity( 92 ).value, 20 );
+
+   liquidate( pid, dan_id, dan_private_key );
+
+   // dan was short 4 and took over a long 10, so he is left long 6 and four contracts are gone.
+   const auto* dan_pos = position_of( mid, dan_id );
+   BOOST_REQUIRE( nullptr != dan_pos );
+   BOOST_CHECK_EQUAL( dan_pos->size.value, 6 );
+   BOOST_CHECK_EQUAL( mid(db).open_interest.value, 10 );
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
