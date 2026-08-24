@@ -880,6 +880,73 @@ share_type minimum_liquidation_size( const futures_market_object& market, share_
    return share_type( hi );
 }
 
+/**
+ * Spread an uncovered bankruptcy across the traders who profited from it.
+ *
+ * When a position is worth less than nothing, someone has to absorb the difference. The
+ * insurance fund is the first line and usually enough. When it is not, the previous behaviour
+ * charged the remainder to whoever called the liquidation -- which reads as fair and is
+ * self-defeating: nobody volunteers to buy a loss, so the bankrupt position is never
+ * liquidated at all and simply sits there, growing, while the market pretends it is solvent.
+ *
+ * The loss is therefore taken from the positions on the other side, in order of how much they
+ * have gained, which is what an auto-deleveraging or socialised-loss mechanism does on any
+ * venue that has one. Note what it is NOT: this does not close anyone's position. Closing
+ * would need a counterparty to close against, and positions here are transferred rather than
+ * matched off, so a haircut to margin is the coherent form in this design.
+ *
+ * Ranked by profit so the traders who gained most from the move that bankrupted the position
+ * are the ones who give some of it back, and nobody is taken below their unrealised gain.
+ *
+ * @return how much was actually recovered, which may be less than asked for.
+ */
+share_type socialise_deficit( database& d, const futures_market_object& market,
+                              share_type bankrupt_sign, share_type amount )
+{
+   if( amount <= 0 || !market.mark_price.valid() )
+      return 0;
+   const share_type mark = *market.mark_price;
+
+   struct winner { futures_position_id_type id; share_type profit; };
+   vector<winner> winners;
+
+   const auto& idx = d.get_index_type<futures_position_index>().indices().get<by_market_owner>();
+   auto itr = idx.lower_bound( boost::make_tuple( market.get_id() ) );
+   const auto end = idx.upper_bound( boost::make_tuple( market.get_id() ) );
+   for( ; itr != end; ++itr )
+   {
+      // Only the other side of the trade. A position on the same side lost too.
+      const share_type side = itr->size > 0 ? share_type( 1 ) : share_type( -1 );
+      if( side == bankrupt_sign )
+         continue;
+      const share_type profit = itr->unrealized_pnl( mark );
+      if( profit > 0 )
+         winners.push_back( { itr->get_id(), profit } );
+   }
+
+   // Largest gain first. Sorted by id as a tiebreak so the outcome cannot depend on index
+   // iteration order, which consensus must never do.
+   std::sort( winners.begin(), winners.end(),
+              []( const winner& a, const winner& b )
+              {
+                 if( a.profit != b.profit ) return a.profit > b.profit;
+                 return a.id < b.id;
+              } );
+
+   share_type recovered = 0;
+   for( const auto& w : winners )
+   {
+      if( recovered >= amount )
+         break;
+      const share_type take = std::min( amount - recovered, w.profit );
+      if( take <= 0 )
+         continue;
+      d.modify( w.id(d), [&take]( futures_position_object& p ) { p.margin -= take; } );
+      recovered += take;
+   }
+   return recovered;
+}
+
 void_result futures_liquidate_evaluator::do_evaluate( const futures_liquidate_operation& op )
 { try {
    const database& d = db();
@@ -972,11 +1039,19 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
    // this; if it cannot cover the whole deficit the remainder falls to the liquidator, who can
    // see it before choosing to call.
    share_type from_fund = 0;
+   share_type socialised = 0;
    if( margin < 0 )
    {
       const share_type deficit = -margin;
       from_fund = market.insurance_fund > 0 ? std::min( deficit, market.insurance_fund )
                                              : share_type( 0 );
+      // Whatever the fund cannot absorb comes from the traders on the other side, ranked by
+      // how much they gained. Charging it to the liquidator instead -- which is what happened
+      // before -- means no rational account ever calls this, and the bankrupt position stays
+      // open indefinitely.
+      const share_type remaining = deficit - from_fund;
+      if( remaining > 0 )
+         socialised = socialise_deficit( d, market, sign, remaining );
       margin = 0;
    }
 
@@ -990,8 +1065,11 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
                                                   market.options.initial_margin_ratio );
    // The liquidator tops the position up to a full initial margin and keeps the penalty, which
    // is what makes calling this worth doing.
+   // The liquidator covers only what neither the fund nor the other side could absorb, which
+   // is the case where the market as a whole is short of collateral and someone has to notice.
    const share_type top_up = ( required > retained ? required - retained : share_type(0) )
-                           + ( margin_at_mark < 0 ? -margin_at_mark - from_fund : share_type(0) );
+                           + ( margin_at_mark < 0
+                               ? -margin_at_mark - from_fund - socialised : share_type(0) );
 
    d.adjust_balance( op.liquidator, -asset( top_up, market.collateral_asset ) );
    if( owner_payout > 0 )
@@ -1001,7 +1079,12 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
       d.modify( market, [&from_fund]( futures_market_object& m )
                         { m.insurance_fund -= from_fund; } );
 
-   const share_type acquired_margin = retained + top_up + from_fund;
+   // NOT plus from_fund and socialised. Those cover the hole -- they are what takes the
+   // position's margin from -deficit up to zero -- and adding them on top as well credited the
+   // new position with money that had already been spent, creating exactly from_fund +
+   // socialised units out of nothing on every bankrupt liquidation. The supply invariant
+   // caught it; no existing test drove a position below zero margin, so it had never run.
+   const share_type acquired_margin = retained + top_up;
 
    // Positions are unique per (market, owner). Reassign in place when the liquidator holds
    // nothing here, so the position keeps its id; otherwise merge into what they already have.
