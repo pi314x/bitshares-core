@@ -1013,20 +1013,33 @@ BOOST_AUTO_TEST_CASE( an_underwater_position_is_liquidated_and_handed_to_the_liq
 
    liquidate( pid, dan_id, dan_private_key );
 
-   // dan now owns it, at the mark, with a full initial margin
+   // Only as much as it takes. Equity is 20 against a maintenance requirement of 46, and the
+   // owner keeps everything but the penalty on the part taken, so the smallest t satisfying
+   //     20 - ceil(t x 92 x 1%)  >=  ceil((10-t) x 92 x 10%)
+   // is 9: keeps 11, needs 10. Taking all ten would have cost bob the whole position and
+   // charged the penalty on the whole notional to fix a shortfall of 26.
    BOOST_REQUIRE( nullptr != db.find( pid ) );
-   BOOST_CHECK( pid(db).owner == dan_id );
-   BOOST_CHECK_EQUAL( pid(db).size.value, 10 );
-   BOOST_CHECK_EQUAL( pid(db).entry_value.value, 920 );      // handed over at the mark
+   BOOST_CHECK( pid(db).owner == bob_id );                   // bob keeps his remainder
+   BOOST_CHECK_EQUAL( pid(db).size.value, 1 );
+   BOOST_CHECK_EQUAL( pid(db).entry_value.value, 92 );        // its share, at the mark
    BOOST_CHECK_EQUAL( pid(db).unrealized_pnl( 92 ).value, 0 );
-   BOOST_CHECK( pid(db).equity( 92 ) >= 92 );                // >= 10 x 92 x 10%
 
-   // bob keeps what is left after the penalty: equity 20 less 1% of the 920 notional, which
-   // rounds UP to 10 because rounding always favours the market.
-   const auto bob_gain = db.get_balance( bob_id, core_id ).amount - bob_before;
-   BOOST_CHECK_EQUAL( bob_gain.value, 10 );
+   // ... and what he keeps is healthy at a FULL initial margin, which is the point of
+   // choosing t this way rather than merely clearing the maintenance line.
+   BOOST_CHECK_EQUAL( pid(db).margin.value, 11 );
+   BOOST_CHECK( pid(db).equity( 92 ) >= 10 );                 // 1 x 92 x 10%, rounded up
 
-   // dan paid the top-up and kept the penalty as part of the position's margin
+   // dan holds the nine contracts he took, at the mark, on a full initial margin.
+   const auto* dan_pos = position_of( mid, dan_id );
+   BOOST_REQUIRE( nullptr != dan_pos );
+   BOOST_CHECK_EQUAL( dan_pos->size.value, 9 );
+   BOOST_CHECK_EQUAL( dan_pos->entry_value.value, 9 * 92 );
+   BOOST_CHECK_EQUAL( dan_pos->margin.value, ( 9 * 92 * 1000 + 9999 ) / 10000 );
+
+   // bob is not paid out: he still holds his position, so nothing is returned to his balance.
+   BOOST_CHECK_EQUAL( ( db.get_balance( bob_id, core_id ).amount - bob_before ).value, 0 );
+
+   // dan posted the initial margin on what he took, less the penalty he earned for taking it.
    BOOST_CHECK( db.get_balance( dan_id, core_id ).amount < dan_before );
 
    check_market_is_balanced( mid );
@@ -1225,11 +1238,14 @@ BOOST_AUTO_TEST_CASE( a_liquidator_may_already_hold_a_position_in_the_market )
 
    liquidate( pid, dan_id, dan_private_key );
 
-   // Merged, not collided: one position, both sides' contracts, and bob's is gone.
-   BOOST_CHECK( nullptr == db.find( pid ) );
+   // Merged, not collided. Liquidation is partial, so bob keeps 1 of his 10 and dan's own
+   // long of 4 absorbs the 9 taken.
+   BOOST_REQUIRE( nullptr != db.find( pid ) );
+   BOOST_CHECK( pid(db).owner == bob_id );
+   BOOST_CHECK_EQUAL( pid(db).size.value, 1 );
    const auto* dan_pos = position_of( mid, dan_id );
    BOOST_REQUIRE( nullptr != dan_pos );
-   BOOST_CHECK_EQUAL( dan_pos->size.value, 14 );
+   BOOST_CHECK_EQUAL( dan_pos->size.value, 13 );
 
    // Like signs, so nothing was retired.
    BOOST_CHECK_EQUAL( mid(db).open_interest.value, oi_before.value );
@@ -1269,10 +1285,11 @@ BOOST_AUTO_TEST_CASE( liquidating_into_an_opposing_position_nets_open_interest_d
 
    liquidate( pid, dan_id, dan_private_key );
 
-   // dan was short 4 and took over a long 10, so he is left long 6 and four contracts are gone.
+   // dan was short 4 and took over 9 of bob's 10, so he is left long 5 and four contracts
+   // net off. Longs afterwards: bob 1, alice 4, dan 5 == 10, against carol's short 10.
    const auto* dan_pos = position_of( mid, dan_id );
    BOOST_REQUIRE( nullptr != dan_pos );
-   BOOST_CHECK_EQUAL( dan_pos->size.value, 6 );
+   BOOST_CHECK_EQUAL( dan_pos->size.value, 5 );
    BOOST_CHECK_EQUAL( mid(db).open_interest.value, 10 );
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }

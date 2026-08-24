@@ -722,6 +722,114 @@ void_result futures_position_adjust_margin_evaluator::do_apply(
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
+/**
+ * Hand `size` contracts (signed) to `who`, carrying `entry_value` and `margin`.
+ *
+ * Creates a position or merges into the one they already hold, since positions are unique per
+ * (market, owner). Summing entry_value is exact: PnL of the merged position is
+ * (s1+s2)*mark - (e1+e2), which is PnL1 + PnL2.
+ *
+ * Open interest counts contracts on the long side, so merging like signs changes nothing while
+ * merging opposite signs nets them off and genuinely retires contracts.
+ */
+void give_position( database& d, const futures_market_object& market, account_id_type who,
+                    share_type size, share_type entry_value, share_type margin )
+{
+   const auto& idx = d.get_index_type<futures_position_index>().indices().get<by_market_owner>();
+   const auto existing = idx.find( boost::make_tuple( market.get_id(), who ) );
+
+   if( existing == idx.end() )
+   {
+      d.create<futures_position_object>( [&]( futures_position_object& p ) {
+         p.owner                  = who;
+         p.market_id              = market.get_id();
+         p.size                   = size;
+         p.entry_value            = entry_value;
+         p.margin                 = margin;
+         p.last_cumulative_funding = market.cumulative_funding;
+      } );
+      return;
+   }
+
+   // Bring their own position up to date first, so both carry the same funding index and the
+   // merged margin means one thing rather than two.
+   apply_funding( d, market, *existing );
+
+   const share_type merged_size  = existing->size + size;
+   const share_type before_long  = std::max( existing->size, share_type( 0 ) )
+                                 + std::max( size, share_type( 0 ) );
+   const share_type after_long   = std::max( merged_size, share_type( 0 ) );
+   const share_type merged_margin = existing->margin + margin;
+   const share_type merged_entry  = existing->entry_value + entry_value;
+
+   if( 0 == merged_size.value )
+   {
+      // The two sides cancelled exactly. There is no position left to hold, so the collateral
+      // goes back rather than sitting in an empty one.
+      if( merged_margin > 0 )
+         d.adjust_balance( who, asset( merged_margin, market.collateral_asset ) );
+      d.remove( *existing );
+   }
+   else
+   {
+      d.modify( *existing, [&]( futures_position_object& p ) {
+         p.size        = merged_size;
+         p.entry_value = merged_entry;
+         p.margin      = merged_margin;
+      } );
+   }
+
+   if( after_long != before_long )
+      d.modify( market, [&before_long, &after_long]( futures_market_object& m ) {
+         m.open_interest += after_long - before_long;
+      } );
+}
+
+/**
+ * The smallest number of contracts that has to leave a position to make what remains healthy.
+ *
+ * The owner keeps everything except the penalty charged on the part being taken, so the
+ * question is the smallest t with
+ *
+ *     margin - penalty(t)  >=  initial_requirement(size - t)
+ *
+ * Note this only has a solution because the liquidation penalty is strictly below the initial
+ * margin ratio: as t grows the left side falls at the penalty rate while the right falls at the
+ * initial-margin rate, so the gap closes. Allocating margin PROPORTIONALLY instead would not
+ * work at all -- margin*r/size >= r*mark*imr/100% reduces to margin/size >= mark*imr/100%,
+ * which is independent of r, so no partial size would ever fix an unhealthy position.
+ *
+ * Solved by bisection rather than the closed form: the predicate is monotone in t, and every
+ * term is a rounded-up integer, so bisection lands on the exact boundary without having to
+ * reason about which way three separate roundings push it.
+ */
+share_type minimum_liquidation_size( const futures_market_object& market, share_type margin,
+                                     share_type abs_size, share_type mark )
+{
+   const auto healthy_after = [&]( share_type t ) {
+      const share_type kept = margin - futures_margin_required(
+            t, mark, market.options.liquidation_penalty_ratio );
+      return kept >= futures_margin_required( abs_size - t, mark,
+                                              market.options.initial_margin_ratio );
+   };
+
+   if( healthy_after( 0 ) )
+      return 0;              // not actually under water; caller decides what that means
+   if( !healthy_after( abs_size ) )
+      return abs_size;       // nothing short of the whole position restores it
+
+   int64_t lo = 0, hi = abs_size.value;   // healthy_after(hi) is true, healthy_after(lo) false
+   while( hi - lo > 1 )
+   {
+      const int64_t midpoint = lo + ( hi - lo ) / 2;
+      if( healthy_after( share_type( midpoint ) ) )
+         hi = midpoint;
+      else
+         lo = midpoint;
+   }
+   return share_type( hi );
+}
+
 void_result futures_liquidate_evaluator::do_evaluate( const futures_liquidate_operation& op )
 { try {
    const database& d = db();
@@ -761,9 +869,54 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
    // everything below is plain arithmetic on one number that actually exists.
    settle_to_mark( d, market, *_position );
 
-   share_type margin = _position->margin;
+   const share_type margin_at_mark = _position->margin;
    const share_type abs_size = _position->abs_size();
+   const share_type sign = _position->size > 0 ? share_type( 1 ) : share_type( -1 );
    const account_id_type old_owner = _position->owner;
+
+   // How much of the position actually has to go.
+   //
+   // Taking all of it whenever a position dips below maintenance is the crude version: it costs
+   // the owner their whole position and charges the penalty on the whole notional, when a
+   // fraction would have restored them to a full initial margin. Every venue that liquidates
+   // for a living takes the minimum that does the job.
+   //
+   // Below zero margin the position is worth less than nothing, no fraction of it is healthy,
+   // and the whole thing has to be taken over.
+   const share_type take = margin_at_mark < 0
+                         ? abs_size
+                         : minimum_liquidation_size( market, margin_at_mark, abs_size, mark );
+
+   if( take < abs_size && take > 0 )
+   {
+      // --- partial ---------------------------------------------------------------------
+      // The penalty falls on the part being taken, and is what the liquidator earns for taking
+      // it. The owner keeps the rest of their margin along with the rest of their position, so
+      // collateral is conserved: (margin - penalty) + required + (paid) == margin.
+      const share_type part_penalty = futures_margin_required(
+            take, mark, market.options.liquidation_penalty_ratio );
+      const share_type part_required = futures_margin_required(
+            take, mark, market.options.initial_margin_ratio );
+      const share_type liquidator_pays = part_required > part_penalty
+                                       ? part_required - part_penalty : share_type( 0 );
+
+      d.adjust_balance( op.liquidator, -asset( liquidator_pays, market.collateral_asset ) );
+
+      // Every contract carries the mark as its entry after settling, so a slice of the position
+      // carries exactly its share of entry_value.
+      const share_type kept_size = abs_size - take;
+      d.modify( *_position, [&]( futures_position_object& p ) {
+         p.size        = sign * kept_size;
+         p.entry_value = sign * kept_size * mark;
+         p.margin      = margin_at_mark - part_penalty;
+      } );
+
+      give_position( d, market, op.liquidator, sign * take, sign * take * mark, part_required );
+      return void_result();
+   }
+
+   // --- whole position -----------------------------------------------------------------
+   share_type margin = margin_at_mark;
 
    // A gap can leave a position worth less than nothing. The insurance fund exists for exactly
    // this; if it cannot cover the whole deficit the remainder falls to the liquidator, who can
@@ -788,7 +941,7 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
    // The liquidator tops the position up to a full initial margin and keeps the penalty, which
    // is what makes calling this worth doing.
    const share_type top_up = ( required > retained ? required - retained : share_type(0) )
-                           + ( margin < 0 ? -margin - from_fund : share_type(0) );
+                           + ( margin_at_mark < 0 ? -margin_at_mark - from_fund : share_type(0) );
 
    d.adjust_balance( op.liquidator, -asset( top_up, market.collateral_asset ) );
    if( owner_payout > 0 )
@@ -800,17 +953,15 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
 
    const share_type acquired_margin = retained + top_up + from_fund;
 
-   // A position is unique per (market, owner). Reassigning owner when the liquidator already
-   // holds one in this market collides on that index and aborts the node -- a crash reachable
-   // by an ordinary operation, on every node processing the block. Merge instead.
+   // Positions are unique per (market, owner). Reassign in place when the liquidator holds
+   // nothing here, so the position keeps its id; otherwise merge into what they already have.
    const auto& pos_idx = d.get_index_type<futures_position_index>().indices()
                           .get<by_market_owner>();
    const auto existing = pos_idx.find( boost::make_tuple( market.get_id(), op.liquidator ) );
-
    if( existing == pos_idx.end() )
    {
       // entry_value is already at the mark after settling, so the position changes hands with
-      // no inherited unrealised PnL: the liquidator takes on a clean position plus the penalty.
+      // no inherited unrealised PnL.
       d.modify( *_position, [&]( futures_position_object& p ) {
          p.owner  = op.liquidator;
          p.margin = acquired_margin;
@@ -818,46 +969,10 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
       return void_result();
    }
 
-   // Bring the liquidator's own position up to date first, so both carry the same funding
-   // index and the merged margin means one thing rather than two.
-   apply_funding( d, market, *existing );
-
-   // Summing entry_value is exact without settling either side: PnL of the merged position is
-   // (s1+s2)*mark - (e1+e2), which is PnL1 + PnL2.
-   const share_type merged_size = existing->size + _position->size;
-
-   // Open interest counts contracts on the long side. Merging opposite signs nets them off,
-   // which genuinely retires contracts; merging like signs does not.
-   const share_type before_long = std::max( existing->size, share_type( 0 ) )
-                                + std::max( _position->size, share_type( 0 ) );
-   const share_type after_long  = std::max( merged_size, share_type( 0 ) );
-
-   const share_type merged_margin = existing->margin + acquired_margin;
-   const share_type merged_entry  = existing->entry_value + _position->entry_value;
-
+   const share_type taken_size  = _position->size;
+   const share_type taken_entry = _position->entry_value;
    d.remove( *_position );
-
-   if( 0 == merged_size.value )
-   {
-      // The two sides cancelled exactly. There is no position left to hold, so the collateral
-      // goes back rather than sitting in an empty one.
-      if( merged_margin > 0 )
-         d.adjust_balance( op.liquidator, asset( merged_margin, market.collateral_asset ) );
-      d.remove( *existing );
-   }
-   else
-   {
-      d.modify( *existing, [&]( futures_position_object& p ) {
-         p.size        = merged_size;
-         p.entry_value = merged_entry;
-         p.margin      = merged_margin;
-      } );
-   }
-
-   if( after_long != before_long )
-      d.modify( market, [&before_long, &after_long]( futures_market_object& m ) {
-         m.open_interest += after_long - before_long;
-      } );
+   give_position( d, market, op.liquidator, taken_size, taken_entry, acquired_margin );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
