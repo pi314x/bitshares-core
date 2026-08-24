@@ -64,6 +64,7 @@ BOOST_AUTO_TEST_CASE( margin_ratio_validation )
    BOOST_CHECK_THROW( zero_maintenance.validate(), fc::exception );
 }
 
+
 BOOST_AUTO_TEST_SUITE_END()
 
 namespace {
@@ -81,7 +82,8 @@ struct futures_fixture : database_fixture
    }
 
    oracle_id_type make_oracle( account_id_type owner, const fc::ecc::private_key& key,
-                               account_id_type producer, const string& name = "BTC.CORE" )
+                               account_id_type producer, const string& name = "BTC.CORE",
+                               const optional<uint32_t>& value_lifetime_sec = {} )
    {
       oracle_create_operation op;
       op.owner       = owner;
@@ -90,6 +92,8 @@ struct futures_fixture : database_fixture
       op.quote_asset = core_id;
       op.options.producers[producer] = 1;
       op.options.minimum_producers = 1;
+      if( value_lifetime_sec.valid() )
+         op.options.value_lifetime_sec = *value_lifetime_sec;
       signed_transaction tx;
       tx.operations.push_back( op );
       db.current_fee_schedule().set_fee( tx.operations.back() );
@@ -1029,6 +1033,69 @@ BOOST_AUTO_TEST_CASE( a_short_is_liquidated_when_the_mark_rises )
    BOOST_CHECK_EQUAL( cpid(db).unrealized_pnl( 108 ).value, 0 );
 
    check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * Regression: a mark whose oracle has gone quiet must stop counting as a mark.
+ *
+ * market.mark_price is written when a producer publishes and never revisited, so it does not
+ * decay. mark_price_time was recorded and read by nothing -- every consumer asked
+ * mark_price.valid(), which stays true for ever once set. An oracle that stopped publishing
+ * therefore froze the mark, and with it froze margin, liquidation and settlement.
+ *
+ * Settlement is the one that cannot be undone: it fixes a single price for everyone in the
+ * market, and the first caller after expiry snapshotted whatever frozen number was sitting
+ * there. A contract whose oracle died weeks before expiry settled the whole market at a
+ * weeks-old price.
+ */
+BOOST_AUTO_TEST_CASE( a_stale_oracle_stops_marking_liquidating_and_settling )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   const uint32_t lifetime = 60;
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id, "STALE.CORE", lifetime );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   const auto expiry = db.head_block_time() + fc::seconds( 30 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, expiry, "BTC-STALE" );
+   BOOST_REQUIRE( mid(db).mark_price.valid() );
+
+   // A matched pair, opened while the oracle is still live.
+   place( mid, alice_id, alice_private_key, true,  100, 10 );
+   place( mid, bob_id,   bob_private_key,   false, 100, 10 );
+   BOOST_REQUIRE_GT( mid(db).open_interest.value, 0 );
+   const auto* long_pos = position_of( mid, alice_id );
+   BOOST_REQUIRE( nullptr != long_pos );
+   const auto long_pos_id = long_pos->get_id();
+
+   // Nobody publishes again. Let the contract expire and the value age out.
+   generate_blocks( db.head_block_time() + fc::seconds( lifetime * 3 ) );
+   set_expiration( db, trx );
+   const auto now = db.head_block_time();
+
+   // The cached mark is untouched -- that is the whole point. Freshness cannot be read off it.
+   BOOST_CHECK( mid(db).mark_price.valid() );
+   BOOST_CHECK( !oid(db).is_value_live( now ) );
+   BOOST_CHECK( now >= *mid(db).expiry );
+
+   // Settling here would fix a stale price for every position in the market, for ever.
+   GRAPHENE_REQUIRE_THROW( settle_market( mid, alice_id, alice_private_key ), fc::exception );
+   BOOST_CHECK( !mid(db).is_settled );
+
+   // Liquidation assesses risk against the mark, so it must refuse too.
+   GRAPHENE_REQUIRE_THROW( liquidate( long_pos_id, bob_id, bob_private_key ), fc::exception );
+
+   // A fresh publish restores all of it -- the market is stalled, not bricked.
+   publish( oid, bob_id, bob_private_key, 100 );
+   BOOST_CHECK( oid(db).is_value_live( db.head_block_time() ) );
+   settle_market( mid, alice_id, alice_private_key );
+   BOOST_CHECK( mid(db).is_settled );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

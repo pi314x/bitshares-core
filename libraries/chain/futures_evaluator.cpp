@@ -68,6 +68,34 @@ void update_futures_mark_price( database& d, const futures_market_object& market
    accrue_futures_funding( d, market );
 }
 
+/**
+ * The mark price, but only while the oracle behind it is still live.
+ *
+ * market.mark_price is a cached figure: it is written when a producer publishes and never
+ * revisited, so it does not decay. mark_price_time was recorded and then read by nothing --
+ * every consumer asked `mark_price.valid()`, which stays true for ever once set.
+ *
+ * That matters because the mark is what margin, liquidation and settlement are measured
+ * against. An oracle that stops publishing froze the mark, and with it froze the risk
+ * assessment: positions that should have been liquidated no longer looked liquidatable, and a
+ * dated contract could be settled -- permanently, for everyone in it -- against a price from
+ * long before expiry.
+ *
+ * Asking the oracle at read time is the only thing that can notice a producer who simply never
+ * comes back. Returning nothing on a stale oracle makes every caller fail closed, which they
+ * already handle: they have a "market has no mark price" path from the case where the oracle
+ * never had a value at all.
+ */
+optional<share_type> live_mark_price( const database& d, const futures_market_object& market )
+{
+   if( !market.mark_price.valid() )
+      return {};
+   const oracle_object* o = d.find( market.oracle_id );
+   if( nullptr == o || !o->is_value_live( d.head_block_time() ) )
+      return {};
+   return market.mark_price;
+}
+
 void update_futures_markets_for_oracle( database& d, const oracle_object& o )
 {
    // Walks only the markets bound to this oracle, via the by_oracle index. Publishing happens
@@ -191,9 +219,10 @@ void settle_to_mark( database& d, const futures_market_object& market,
 {
    apply_funding( d, market, pos );
 
-   if( !market.mark_price.valid() )
+   const auto live = live_mark_price( d, market );
+   if( !live.valid() )
       return;
-   const share_type mark = *market.mark_price;
+   const share_type mark = *live;
    const share_type pnl  = pos.size * mark - pos.entry_value;
    if( 0 == pnl.value )
       return;
@@ -301,8 +330,9 @@ void require_margin_at_mark( database& d, const futures_market_object& market,
    if( itr == idx.end() )
       return;   // the fill closed the position outright
 
-   FC_ASSERT( market.mark_price.valid(), "Market has no mark price" );
-   const share_type mark = *market.mark_price;
+   const auto live = live_mark_price( d, market );
+   FC_ASSERT( live.valid(), "Market has no live mark price" );
+   const share_type mark = *live;
 
    const share_type equity   = itr->equity( mark );
    const share_type required = futures_margin_required( itr->abs_size(), mark,
@@ -547,10 +577,11 @@ void_result futures_position_adjust_margin_evaluator::do_evaluate(
    if( op.delta < 0 )
    {
       const futures_market_object& market = _position->market_id(d);
-      FC_ASSERT( market.mark_price.valid(),
-                 "Margin cannot be withdrawn while the market has no mark price to measure "
-                 "the requirement against" );
-      const share_type mark = *market.mark_price;
+      const auto live = live_mark_price( d, market );
+      FC_ASSERT( live.valid(),
+                 "Margin cannot be withdrawn while the market has no live mark price to "
+                 "measure the requirement against" );
+      const share_type mark = *live;
       const share_type required = futures_margin_required( _position->abs_size(), mark,
                                                     market.options.initial_margin_ratio );
       // Measured against the INITIAL requirement, not the maintenance one: withdrawing down to
@@ -592,9 +623,9 @@ void_result futures_liquidate_evaluator::do_evaluate( const futures_liquidate_op
    _position = &op.position_id(d);
    _market   = &_position->market_id(d);
 
-   FC_ASSERT( _market->mark_price.valid(),
-              "Cannot liquidate while the market has no mark price: risk would be assessed "
-              "against a price nobody is asserting" );
+   FC_ASSERT( live_mark_price( d, *_market ).valid(),
+              "Cannot liquidate while the market has no live mark price: risk would be "
+              "assessed against a price nobody is currently asserting" );
 
    const share_type mark = *_market->mark_price;
    const share_type maintenance = futures_margin_required(
@@ -671,14 +702,19 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
 
 void accrue_futures_funding( database& d, const futures_market_object& market )
 {
-   if( !market.is_perpetual() || market.is_settled || !market.mark_price.valid() )
+   if( !market.is_perpetual() || market.is_settled )
+      return;
+   // Funding transfers value between longs and shorts. Charging it off a frozen mark would
+   // move real collateral on the strength of a price nobody is still asserting.
+   const auto live = live_mark_price( d, market );
+   if( !live.valid() )
       return;
 
    const auto now = d.head_block_time();
    if( ( now - market.last_funding_time ).to_seconds() < int64_t( market.options.funding_interval_sec ) )
       return;
 
-   const share_type mark = *market.mark_price;
+   const share_type mark = *live;
 
    // The premium is measured against the book's mid. With one side empty there is no mid and
    // therefore no premium: funding is skipped rather than guessed at, because a guessed
@@ -727,8 +763,11 @@ void_result futures_settle_evaluator::do_evaluate( const futures_settle_operatio
    FC_ASSERT( now >= *_market->expiry,
               "Contract '${s}' does not expire until ${e}",
               ("s", _market->symbol)("e", *_market->expiry) );
-   FC_ASSERT( _market->is_settled || _market->mark_price.valid(),
-              "Cannot settle: the oracle has no value to settle against" );
+   // Settlement fixes one price for everyone in the market and cannot be revisited, so a
+   // stale oracle must block it rather than be snapshotted. Once settled the price is already
+   // fixed and the oracle is irrelevant.
+   FC_ASSERT( _market->is_settled || live_mark_price( d, *_market ).valid(),
+              "Cannot settle: the oracle has no live value to settle against" );
 
    if( op.position_id.valid() )
    {
