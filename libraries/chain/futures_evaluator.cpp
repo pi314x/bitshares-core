@@ -798,12 +798,66 @@ void_result futures_liquidate_evaluator::do_apply( const futures_liquidate_opera
       d.modify( market, [&from_fund]( futures_market_object& m )
                         { m.insurance_fund -= from_fund; } );
 
-   // entry_value is already at the mark after settling, so the position changes hands with no
-   // inherited unrealised PnL: the liquidator takes on a clean position plus the penalty.
-   d.modify( *_position, [&]( futures_position_object& p ) {
-      p.owner  = op.liquidator;
-      p.margin = retained + top_up + from_fund;
-   } );
+   const share_type acquired_margin = retained + top_up + from_fund;
+
+   // A position is unique per (market, owner). Reassigning owner when the liquidator already
+   // holds one in this market collides on that index and aborts the node -- a crash reachable
+   // by an ordinary operation, on every node processing the block. Merge instead.
+   const auto& pos_idx = d.get_index_type<futures_position_index>().indices()
+                          .get<by_market_owner>();
+   const auto existing = pos_idx.find( boost::make_tuple( market.get_id(), op.liquidator ) );
+
+   if( existing == pos_idx.end() )
+   {
+      // entry_value is already at the mark after settling, so the position changes hands with
+      // no inherited unrealised PnL: the liquidator takes on a clean position plus the penalty.
+      d.modify( *_position, [&]( futures_position_object& p ) {
+         p.owner  = op.liquidator;
+         p.margin = acquired_margin;
+      } );
+      return void_result();
+   }
+
+   // Bring the liquidator's own position up to date first, so both carry the same funding
+   // index and the merged margin means one thing rather than two.
+   apply_funding( d, market, *existing );
+
+   // Summing entry_value is exact without settling either side: PnL of the merged position is
+   // (s1+s2)*mark - (e1+e2), which is PnL1 + PnL2.
+   const share_type merged_size = existing->size + _position->size;
+
+   // Open interest counts contracts on the long side. Merging opposite signs nets them off,
+   // which genuinely retires contracts; merging like signs does not.
+   const share_type before_long = std::max( existing->size, share_type( 0 ) )
+                                + std::max( _position->size, share_type( 0 ) );
+   const share_type after_long  = std::max( merged_size, share_type( 0 ) );
+
+   const share_type merged_margin = existing->margin + acquired_margin;
+   const share_type merged_entry  = existing->entry_value + _position->entry_value;
+
+   d.remove( *_position );
+
+   if( 0 == merged_size.value )
+   {
+      // The two sides cancelled exactly. There is no position left to hold, so the collateral
+      // goes back rather than sitting in an empty one.
+      if( merged_margin > 0 )
+         d.adjust_balance( op.liquidator, asset( merged_margin, market.collateral_asset ) );
+      d.remove( *existing );
+   }
+   else
+   {
+      d.modify( *existing, [&]( futures_position_object& p ) {
+         p.size        = merged_size;
+         p.entry_value = merged_entry;
+         p.margin      = merged_margin;
+      } );
+   }
+
+   if( after_long != before_long )
+      d.modify( market, [&before_long, &after_long]( futures_market_object& m ) {
+         m.open_interest += after_long - before_long;
+      } );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
