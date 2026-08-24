@@ -430,7 +430,9 @@ namespace graphene { namespace chain {
           * An absent @p oracle_value produces the same null feed the legacy path produces
           * when too few feeds are live, so every downstream consumer already handles it.
           */
-         void update_feed_from_oracle( time_point_sec current_time,
+         /// @param value_time when the oracle's aggregate was formed -- NOT the current time.
+         ///        See the definition: stamping "now" makes the feed unexpirable.
+         void update_feed_from_oracle( time_point_sec value_time,
                                        const optional<price>& oracle_value );
       private:
          /// Derive @ref current_maintenance_collateralization and @ref current_initial_collateralization from
