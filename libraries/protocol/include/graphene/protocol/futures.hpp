@@ -60,6 +60,27 @@ namespace graphene { namespace protocol {
        */
       uint16_t maintenance_margin_ratio = 500;
 
+      /**
+       * How fast the mark price may move, in parts per million of the mark PER SECOND. Zero
+       * disables the limit, which is the default.
+       *
+       * The mark is what margin, liquidation and settlement are measured against, and without
+       * a limit it is whatever the oracle last said. A single print -- a manipulated one, or a
+       * genuine wick that reverts in the next block -- becomes the mark immediately and can
+       * cascade liquidations across every position in the market. Rate-limiting it means a
+       * sustained move still arrives, just not all at once, which is the trade every venue
+       * that quotes a mark separately from an index makes.
+       *
+       * Per second rather than per update, because updates happen on oracle publishes: a
+       * per-update limit would let a producer walk the mark as fast as they cared to publish.
+       *
+       * Left at zero by default deliberately. Switching it on changes the price every existing
+       * position is measured against, and the right value depends entirely on the volatility
+       * of the underlying -- 50 ppm/s suits a stablecoin pair and would badly lag BTC. That is
+       * a per-market decision, not one to make silently on everybody's behalf.
+       */
+      uint32_t max_mark_move_ppm = 0;
+
       /// Perpetuals only, ignored by dated contracts.
       uint32_t funding_interval_sec = 28800;   // 8 hours, the common venue default
       uint32_t max_funding_rate_ppm = 750;     // 0.075% per interval
@@ -314,7 +335,7 @@ namespace graphene { namespace protocol {
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::futures_market_options,
-            (initial_margin_ratio)(maintenance_margin_ratio)
+            (initial_margin_ratio)(maintenance_margin_ratio)(max_mark_move_ppm)
             (funding_interval_sec)(max_funding_rate_ppm)
             (liquidation_penalty_ratio)(enabled)(extensions) )
 
