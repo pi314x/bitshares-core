@@ -526,12 +526,19 @@ void_result futures_order_create_evaluator::do_evaluate( const futures_order_cre
               "Market '${s}' is not accepting orders: it is halted, settled, past expiry, or "
               "has no mark price", ("s", _market->symbol) );
 
+   // The fee is reserved at the LIMIT price, which is the most the order can ever be charged:
+   // a taker fills at the maker's price, which is never worse than its own limit. Whatever is
+   // reserved and not spent goes back with the rest of the unused margin.
+   _max_fee = futures_ppm_of( op.size * op.price_per_contract,
+                              _market->options.taker_fee_ppm );
+
    _required_margin = futures_margin_required( op.size, op.price_per_contract,
                                                _market->options.initial_margin_ratio );
 
    // Reserved up front rather than at fill time. An order that could not be paid for if it
    // filled has no business resting on the book.
-   FC_ASSERT( d.get_balance( op.owner, _market->collateral_asset ).amount >= _required_margin,
+   FC_ASSERT( d.get_balance( op.owner, _market->collateral_asset ).amount
+                 >= _required_margin + _max_fee,
               "Insufficient balance to reserve ${m} margin for this order",
               ("m", _required_margin) );
 
@@ -562,10 +569,11 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
    database& d = db();
    const futures_market_object& market = *_market;
 
-   d.adjust_balance( op.owner, -asset( _required_margin, market.collateral_asset ) );
+   d.adjust_balance( op.owner, -asset( _required_margin + _max_fee, market.collateral_asset ) );
 
    share_type remaining = op.size;
    share_type reserved  = _required_margin;
+   share_type fee_left  = _max_fee;
    share_type oi_delta  = 0;
 
    const auto& book = d.get_index_type<futures_order_index>().indices().get<by_market_book>();
@@ -605,6 +613,16 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
       const share_type fill_price = best->price_per_contract;
       const share_type n = std::min( remaining, best->size );
 
+      // Maker/taker. The taker pays on the notional it just lifted; the maker is paid for
+      // having been there to lift, and the remainder capitalises the insurance fund. Charged
+      // per fill rather than on the whole order, because each fill has its own price.
+      const share_type notional   = n * fill_price;
+      const share_type taker_fee  = futures_ppm_of( notional, market.options.taker_fee_ppm );
+      const share_type maker_paid = futures_ppm_of( notional, market.options.maker_rebate_ppm );
+      // Rounding up both could put the rebate above the fee on a small fill, which would pay
+      // the maker out of the fund. validate() bounds the rates; this bounds the rounding.
+      const share_type rebate = std::min( maker_paid, taker_fee );
+
       // The maker's margin was reserved at its own price when it was placed.
       const share_type maker_margin = futures_margin_required(
             n, fill_price, market.options.initial_margin_ratio );
@@ -627,6 +645,12 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
       const share_type taker_shortfall = taker_margin - taker_share;
       if( taker_shortfall > 0 )
          d.adjust_balance( op.owner, -asset( taker_shortfall, market.collateral_asset ) );
+
+      // Take the fee from what was reserved for it, pay the maker, and put the rest in the
+      // fund. Bounded by fee_left so rounding across many fills can never overdraw the reserve.
+      const share_type charged = std::min( taker_fee, fee_left );
+      const share_type to_maker = std::min( rebate, charged );
+      fee_left -= charged;
 
       const account_id_type maker_account = best->owner;
       const share_type maker_remaining = best->size - n;
@@ -657,6 +681,15 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
       record_fill( d, market, maker_account, !op.is_long, n, fill_price, true );
       record_fill( d, market, op.owner,       op.is_long, n, fill_price, false );
 
+      // Settle the fee. It was already taken from the taker's balance with the margin, so
+      // only the outward halves move here: the rebate to the maker, the rest to the fund.
+      if( to_maker > 0 )
+         d.adjust_balance( maker_account, asset( to_maker, market.collateral_asset ) );
+      const share_type to_fund = charged - to_maker;
+      if( to_fund > 0 )
+         d.modify( market, [&to_fund]( futures_market_object& m )
+                           { m.insurance_fund += to_fund; } );
+
       remaining -= n;
    }
 
@@ -677,14 +710,21 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
          o.size               = remaining;
          o.deferred_margin    = reserved;
       } );
+      // The resting remainder will be a MAKER when it fills, and makers are not charged, so
+      // the unspent fee reserve is returned rather than held against an order that cannot owe
+      // it. Crossing again later reserves afresh.
+      if( fee_left > 0 )
+         d.adjust_balance( op.owner, asset( fee_left, market.collateral_asset ) );
       // A new resting order changes the book, and so the premium in force from now on.
       resample_premium( d, market );
       return order.id;
    }
 
-   // Fully filled, or killed. Whatever margin was reserved and not used goes back.
-   if( reserved > 0 )
-      d.adjust_balance( op.owner, asset( reserved, market.collateral_asset ) );
+   // Fully filled, or killed. Whatever margin was reserved and not used goes back, and with
+   // it any of the fee reserve that was never charged -- the reserve was taken at the limit
+   // price, and a taker that filled better than its limit owes less than that.
+   if( reserved + fee_left > 0 )
+      d.adjust_balance( op.owner, asset( reserved + fee_left, market.collateral_asset ) );
 
    // Fills consume resting orders, which moves the book just as surely as adding one.
    resample_premium( d, market );

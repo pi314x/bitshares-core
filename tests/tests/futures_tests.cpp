@@ -1036,6 +1036,102 @@ BOOST_AUTO_TEST_CASE( an_aggressive_fill_or_kill_order_sweeps_the_book_like_a_ma
    check_market_is_balanced( mid );
 }
 
+
+/**
+ * Maker/taker: the taker pays on the notional it lifts, the maker is paid for having been
+ * there to lift, and the remainder capitalises the insurance fund.
+ *
+ * Paying the maker is the substance of it. A venue that charges both sides the same is asking
+ * for a book it declines to pay for; the rebate is what makes resting an order worth doing.
+ * And the remainder going to the fund rather than to an operator means trading activity
+ * capitalises the thing that absorbs a bankruptcy.
+ */
+BOOST_AUTO_TEST_CASE( a_taker_pays_a_fee_the_maker_is_rebated_and_the_fund_keeps_the_rest )
+{
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
+   fund( carol, asset(100000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, alice_id, "FEE.CORE" );
+   publish( oid, alice_id, alice_private_key, 1000 );
+
+   futures_market_options opts = undamped();
+   opts.taker_fee_ppm    = 4000;   // 0.4% of notional
+   opts.maker_rebate_ppm = 1000;   // 0.1% back to the maker
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-FEE", opts );
+
+   // bob rests an ask; carol crosses it.
+   place( mid, bob_id, bob_private_key, false, 1000, 10 );
+
+   const auto bob_before   = db.get_balance( bob_id, core_id ).amount;
+   const auto carol_before = db.get_balance( carol_id, core_id ).amount;
+   const auto fund_before  = mid(db).insurance_fund;
+
+   place( mid, carol_id, carol_private_key, true, 1000, 10 );
+
+   const share_type notional = 10 * 1000;
+   const share_type fee      = ( notional.value * 4000 + 999999 ) / 1000000;   // 40
+   const share_type rebate   = ( notional.value * 1000 + 999999 ) / 1000000;   // 10
+
+   // The maker is paid, and paid exactly the rebate -- his margin moved into a position, so
+   // the only balance change left is what the fee paid him.
+   const auto bob_gain = db.get_balance( bob_id, core_id ).amount - bob_before;
+   BOOST_CHECK_EQUAL( bob_gain.value, rebate.value );
+
+   // The fund keeps the difference.
+   BOOST_CHECK_EQUAL( ( mid(db).insurance_fund - fund_before ).value,
+                      ( fee - rebate ).value );
+
+   // And the taker paid it: her outlay exceeds the margin alone by exactly the fee.
+   const auto carol_paid = carol_before - db.get_balance( carol_id, core_id ).amount;
+   const auto* carol_pos = position_of( mid, carol_id );
+   BOOST_REQUIRE( nullptr != carol_pos );
+   BOOST_CHECK_EQUAL( ( carol_paid - carol_pos->margin ).value, fee.value );
+
+   check_market_is_balanced( mid );
+}
+
+/// A resting order is a maker when it fills, and makers are not charged. Whatever fee was
+/// reserved for the crossing part has to come back rather than sit against the remainder.
+BOOST_AUTO_TEST_CASE( an_unfilled_remainder_does_not_keep_holding_a_fee_reserve )
+{
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, alice_id, "FEE2.CORE" );
+   publish( oid, alice_id, alice_private_key, 1000 );
+
+   futures_market_options opts = undamped();
+   opts.taker_fee_ppm    = 4000;
+   opts.maker_rebate_ppm = 0;
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-FEE2", opts );
+
+   const auto before = db.get_balance( bob_id, core_id ).amount;
+
+   // Nothing to cross, so the whole order rests and nothing is owed in fees.
+   const futures_order_id_type oid_rest {
+      place( mid, bob_id, bob_private_key, true, 1000, 10 ) };
+   BOOST_REQUIRE( nullptr != db.find( oid_rest ) );
+
+   // Only the margin left his balance; the fee reserve came straight back.
+   const auto paid = before - db.get_balance( bob_id, core_id ).amount;
+   BOOST_CHECK_EQUAL( paid.value, oid_rest(db).deferred_margin.value );
+
+   // Cancelling returns it, so he ends where he started.
+   cancel( oid_rest, bob_id, bob_private_key );
+   BOOST_CHECK_EQUAL( db.get_balance( bob_id, core_id ).amount.value, before.value );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 

@@ -73,6 +73,16 @@ void futures_market_options::validate()const
    FC_ASSERT( max_mark_move_ppm <= 1000000,
               "Maximum mark move may not exceed 1000000 ppm (100%) per second" );
 
+   FC_ASSERT( taker_fee_ppm <= GRAPHENE_FUTURES_MAX_TRADING_FEE_PPM,
+              "Taker fee may not exceed ${m} ppm of notional",
+              ("m", GRAPHENE_FUTURES_MAX_TRADING_FEE_PPM) );
+   // A rebate above the fee would pay makers more than takers put in, so every fill would
+   // drain the insurance fund rather than capitalise it.
+   FC_ASSERT( maker_rebate_ppm <= taker_fee_ppm,
+              "Maker rebate (${r}) may not exceed the taker fee (${t}), or every fill would "
+              "pay out more than it collects",
+              ("r", maker_rebate_ppm)("t", taker_fee_ppm) );
+
    FC_ASSERT( funding_interval_sec >= GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC,
               "Funding interval must be at least ${s} seconds",
               ("s", GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC) );
