@@ -551,7 +551,12 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_resists_a_single_spike )
    opts.minimum_producers  = 1;
    opts.value_lifetime_sec = 86400;
    opts.aggregation        = oracle_aggregation_method::median_over_window;
-   opts.window_sec         = 86400;
+   // A window commensurate with the test's own timescale. History samples at
+   // window_sec/MAX_HISTORY, so a day-long window buckets at ~22 minutes and publishes five
+   // seconds apart all collapse into one sample -- there would be no history to damp with.
+   // That is not the sampler being wrong, it is a day-long window genuinely having seen only
+   // seconds of data; the old ring hid it by keeping every publish regardless of spacing.
+   opts.window_sec         = 300;
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
 
    // a settled history at 100
@@ -1100,6 +1105,96 @@ BOOST_AUTO_TEST_CASE( a_bound_feed_is_stamped_with_the_oracle_value_time )
    BOOST_CHECK( db.head_block_time() > value_time );
    BOOST_CHECK_EQUAL( mia_id(db).bitasset_data(db).current_feed_publication_time.sec_since_epoch(),
                       value_time.sec_since_epoch() );
+} FC_LOG_AND_RETHROW() }
+
+
+/**
+ * Regression: the window a windowed median covers must follow window_sec, not the publish rate.
+ *
+ * History is a fixed ring of GRAPHENE_ORACLE_MAX_HISTORY entries. Appending one per publish
+ * made the span it covers a function of how often producers publish: at one publish per block
+ * the ring holds about five minutes, so an oracle configured for an hour -- or a day -- was
+ * really taking its median over five minutes, and nothing reported the discrepancy.
+ *
+ * The perverse part is that it is not an attack. It is what happens when the oracle works well:
+ * the more diligently the producers publish, the weaker the damping they were configured to get.
+ */
+BOOST_AUTO_TEST_CASE( a_windowed_median_covers_its_configured_window_however_often_producers_publish )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   const asset_object& mia = create_bitasset( "MIAWINDOW", alice_id );
+   const auto mia_id = mia.get_id();
+
+   const uint32_t window = 3600;
+
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "WINDOW.CORE";
+   cop.base_asset  = mia_id;
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id] = 1;
+   cop.options.minimum_producers = 1;
+   cop.options.aggregation       = oracle_aggregation_method::median_over_window;
+   cop.options.window_sec        = window;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   auto pub = [&]( int64_t n ) {
+      oracle_publish_operation op;
+      op.producer  = bob_id;
+      op.oracle_id = oid;
+      op.value     = price( asset( 1, mia_id ), asset( n, asset_id_type() ) );
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+
+   // Publish every block for comfortably more blocks than the ring can hold.
+   const int publishes = GRAPHENE_ORACLE_MAX_HISTORY * 2;
+   for( int i = 0; i < publishes; ++i )
+   {
+      pub( 100 );
+      generate_block();
+      set_expiration( db, trx );
+   }
+
+   const auto& hist = oid(db).history;
+   BOOST_REQUIRE( !hist.empty() );
+   BOOST_CHECK_LE( hist.size(), size_t( GRAPHENE_ORACLE_MAX_HISTORY ) );
+
+   // Entries must be spaced by at least the bucket, so a full ring spans the whole window.
+   const int64_t bucket = std::max<int64_t>(
+      1, int64_t( window ) / int64_t( GRAPHENE_ORACLE_MAX_HISTORY ) );
+   for( size_t i = 1; i < hist.size(); ++i )
+   {
+      const int64_t gap = ( hist[i].first - hist[i-1].first ).to_seconds();
+      BOOST_CHECK_MESSAGE( gap >= bucket,
+                           "history entries " << (i-1) << " and " << i << " are only "
+                           << gap << "s apart, below the " << bucket << "s bucket" );
+   }
+
+   // With one publish per block the ring used to saturate and cover only
+   // MAX_HISTORY * block_interval seconds. It must now still reach back over everything
+   // published, because far fewer slots were consumed.
+   const int64_t covered = ( db.head_block_time() - hist.front().first ).to_seconds();
+   const int64_t naive_span = int64_t( GRAPHENE_ORACLE_MAX_HISTORY )
+                            * int64_t( db.get_global_properties().parameters.block_interval );
+   BOOST_CHECK_MESSAGE( covered > naive_span,
+                        "history reaches back only " << covered << "s; appending per publish "
+                        "would have given " << naive_span << "s, so nothing improved" );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()
