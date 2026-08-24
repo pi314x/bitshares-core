@@ -751,6 +751,89 @@ BOOST_AUTO_TEST_CASE( orders_are_refused_when_the_market_is_not_tradable )
    GRAPHENE_REQUIRE_THROW( place( mid, bob_id, bob_private_key, true, 100, 1 ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * A premium held for a moment must not move funding as much as one held all interval.
+ *
+ * Funding used to read the book mid ONCE, at the instant the interval elapsed. Whichever two
+ * orders happened to be best at that moment set the rate for the whole interval, so on a thin
+ * book a single non-marketable order placed just before the sample -- and cancelled just after
+ * -- moved the mid as far as the cap allowed. That is a repeatable transfer from one side of
+ * the market to the other, every interval, for the price of an order that never fills.
+ *
+ * The premium is now time-weighted across the interval, so a quote only counts for as long as
+ * it is actually exposed. This runs the same skew twice: held briefly, then held throughout.
+ */
+BOOST_AUTO_TEST_CASE( a_momentary_quote_cannot_set_the_funding_rate )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   // A mark large enough that the rate cap is not a single unit. At a mark of 100 the cap is
+   // ceil(100 * 750/1e6) == 1, so a held premium and a momentary one both saturate it and the
+   // two are indistinguishable at integer resolution -- the measurement, not the behaviour.
+   const int64_t oracle_price = 10000000;
+   fund( alice, asset( 1000000000000 ) );
+   fund( bob,   asset( 1000000000000 ) );
+   fund( carol, asset( 1000000000000 ) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, alice_id, "FUND.CORE" );
+   publish( oid, alice_id, alice_private_key, oracle_price );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+   BOOST_REQUIRE( mid(db).is_perpetual() );
+
+   const int64_t mark = mid(db).mark_price->value;
+   const uint32_t interval = mid(db).options.funding_interval_sec;
+
+   // A thin book centred on the mark, so the baseline premium is zero and any movement is the
+   // skew and nothing else. Deliberately NOT a very wide book: with bids and asks far from the
+   // mark the mid alone already exceeds the rate cap, and every reading saturates whatever the
+   // sampler does -- which would make this test pass for the wrong reason.
+   const int64_t cap    = ( mark * 750 + 999999 ) / 1000000;   // futures_ppm_of, rounded up
+   const int64_t spread = cap * 4;
+   place( mid, bob_id,   bob_private_key,   true,  mark - spread, 1 );
+   place( mid, carol_id, carol_private_key, false, mark + spread, 1 );
+   BOOST_REQUIRE_GT( cap, 1 );   // otherwise the two runs cannot differ at integer resolution
+
+   // --- run one: skew the book for a single block near the end of the interval ---------
+   generate_blocks( db.head_block_time() + fc::seconds( interval - 10 ) );
+   set_expiration( db, trx );
+   const futures_order_id_type skew_order {
+      place( mid, bob_id, bob_private_key, true, mark + spread - 1, 1 ) };
+   publish( oid, alice_id, alice_private_key, oracle_price );   // sample the skew
+   cancel( skew_order, bob_id, bob_private_key );
+
+   const auto before_brief = mid(db).cumulative_funding;
+   generate_blocks( db.head_block_time() + fc::seconds( 20 ) );
+   set_expiration( db, trx );
+   publish( oid, alice_id, alice_private_key, oracle_price );   // closes the interval
+   const auto brief_funding = mid(db).cumulative_funding - before_brief;
+
+   // --- run two: the same skew, held for the whole interval ----------------------------
+   const futures_order_id_type held_order {
+      place( mid, bob_id, bob_private_key, true, mark + spread - 1, 1 ) };
+   const auto before_held = mid(db).cumulative_funding;
+   // Publish periodically, as a live oracle would, so the premium is sampled across the span.
+   for( int i = 0; i < 4; ++i )
+   {
+      generate_blocks( db.head_block_time() + fc::seconds( interval / 4 ) );
+      set_expiration( db, trx );
+      publish( oid, alice_id, alice_private_key, oracle_price );
+   }
+   const auto held_funding = mid(db).cumulative_funding - before_held;
+   cancel( held_order, bob_id, bob_private_key );
+
+   BOOST_TEST_MESSAGE( "funding from a momentary skew: " << brief_funding.value
+                       << ", from a skew held all interval: " << held_funding.value );
+
+   // Holding the quote must cost the market more than flashing it. Under the old sampler the
+   // two were identical, because only the final instant was ever read.
+   BOOST_CHECK_GT( held_funding.value, brief_funding.value );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
