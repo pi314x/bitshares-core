@@ -150,7 +150,28 @@ void oracle_object::update_current_value( time_point_sec now )
    const price latest = weighted_median( live );
    current_value_producer_count = uint16_t( live.size() );
 
-   history.emplace_back( now, latest );
+   // Sample into time buckets rather than appending every publish.
+   //
+   // The ring holds GRAPHENE_ORACLE_MAX_HISTORY entries. Appending one per publish made the
+   // window it can span a function of how often producers publish, not of window_sec: at one
+   // publish per block the ring covers about five minutes, so an oracle configured to take a
+   // median over an hour -- or a day -- was in fact taking it over five minutes, and nothing
+   // said so. The damping got WEAKER the more diligently the producers published.
+   //
+   // Spacing entries at window_sec/MAX_HISTORY makes a full ring span the configured window
+   // whatever the publish rate. Publishes inside the current bucket refresh its value rather
+   // than consuming a slot, so the newest sample is always the newest aggregate.
+   const int64_t bucket = std::max<int64_t>(
+      1, int64_t( options.window_sec ) / int64_t( GRAPHENE_ORACLE_MAX_HISTORY ) );
+
+   // Refresh the VALUE but keep the timestamp, because it marks when the bucket opened.
+   // Advancing it on every publish would push the boundary forward each time and the bucket
+   // would never close -- the ring would hold one perpetually-refreshed entry.
+   if( !history.empty() && ( now - history.back().first ).to_seconds() < bucket )
+      history.back().second = latest;
+   else
+      history.emplace_back( now, latest );
+
    if( history.size() > size_t( GRAPHENE_ORACLE_MAX_HISTORY ) )
       history.erase( history.begin() );
 
