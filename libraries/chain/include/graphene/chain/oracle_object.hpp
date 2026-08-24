@@ -102,6 +102,20 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       }
 
       /**
+       * @return whether @ref current_value is still within its lifetime at @p now.
+       *
+       * Freshness has to be a READ-time question, not a write-time one. current_value is only
+       * recomputed when a producer publishes, so an oracle whose producers all stop simply
+       * keeps its last value for ever: there is no sweep that would notice. Consumers that ask
+       * only `current_value.valid()` therefore go on using a price that expired long ago, and
+       * value_lifetime_sec silently means nothing.
+       */
+      bool is_value_live( time_point_sec now )const
+      {
+         return current_value.valid() && is_submission_live( current_value_time, now );
+      }
+
+      /**
        * Recomputes @ref current_value from @ref submissions and, for median_over_window, from
        * @ref history, and appends to the history ring.
        *

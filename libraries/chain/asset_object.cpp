@@ -30,10 +30,21 @@
 
 namespace graphene { namespace chain {
 
-void asset_bitasset_data_object::update_feed_from_oracle( time_point_sec current_time,
+void asset_bitasset_data_object::update_feed_from_oracle( time_point_sec value_time,
                                                          const optional<price>& oracle_value )
 {
-   current_feed_publication_time = current_time;
+   // Stamp the feed with when the ORACLE VALUE was formed, not with the current time.
+   //
+   // Stamping it "now" on every maintenance cycle made the feed permanently unexpirable:
+   // feed_expiration_time() is current_feed_publication_time + feed_lifetime_sec, so a feed
+   // re-stamped every cycle can never age out. That removed, for oracle-bound assets only,
+   // the protection every other bitasset has -- a dead price feed expiring and taking margin
+   // calls with it. An asset whose oracle stopped publishing a year ago went on force-settling
+   // against the frozen price while reporting a perfectly current feed.
+   //
+   // With the real value time, an oracle that goes quiet lets the feed expire exactly as a
+   // silent set of feed producers would.
+   current_feed_publication_time = value_time;
 
    // An oracle publishes a market price, not a fee-conversion rate. Leaving the feed's CER
    // null keeps need_to_update_cer() false, so the issuer's own

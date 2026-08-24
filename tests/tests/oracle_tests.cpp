@@ -934,6 +934,174 @@ BOOST_AUTO_TEST_CASE( a_price_oracle_cannot_be_set_when_creating_an_asset )
    GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * Regression: a bound smartcoin must not go on quoting an oracle whose producers have stopped.
+ *
+ * This is not the "quorum was lost" case already covered above, which is noticed because an
+ * oracle_update forces a recompute. Here NOTHING happens: no publish, no update, just time
+ * passing. current_value is only recomputed when a producer publishes, so the oracle keeps its
+ * last aggregate for ever, and a consumer that asks only current_value.valid() never learns
+ * that value_lifetime_sec elapsed.
+ *
+ * What made it self-perpetuating rather than merely stale is update_expired_feeds(), which runs
+ * EVERY BLOCK over exactly those assets whose feed has expired. It called
+ * update_bitasset_current_feed() on each, which re-stamped current_feed_publication_time to the
+ * current head time while carrying the dead oracle price. The feed expired for one block and was
+ * resurrected the next, indefinitely -- by the very routine whose job is to retire expired feeds.
+ *
+ * The fixed end state is a CURRENT feed carrying a NULL settlement price, which is exactly what
+ * the legacy path produces when fewer than minimum_feeds are live -- so nothing downstream needs
+ * a new case, and margin calls simply do not run. The guarantee under test is that the price is
+ * gone and stays gone, not that the feed object is flagged expired.
+ */
+BOOST_AUTO_TEST_CASE( a_smartcoin_stops_quoting_an_oracle_whose_producers_went_silent )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   const asset_object& mia = create_bitasset( "MIASILENT", alice_id );
+   const auto mia_id = mia.get_id();
+
+   const uint32_t lifetime = 60;   // short, so the test does not need hours of blocks
+
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "SILENT.CORE";
+   cop.base_asset  = mia_id;
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id]  = 1;
+   cop.options.minimum_producers  = 1;
+   cop.options.value_lifetime_sec = lifetime;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // One publish, then silence.
+   {
+      oracle_publish_operation op;
+      op.producer  = bob_id;
+      op.oracle_id = oid;
+      op.value     = price( asset( 1, mia_id ), asset( 10, asset_id_type() ) );
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
+   // Bind, and shorten the asset's own feed lifetime so the expiry path is reachable in a
+   // handful of blocks rather than a day.
+   {
+      asset_update_bitasset_operation op;
+      op.issuer          = alice_id;
+      op.asset_to_update = mia_id;
+      op.new_options     = mia_id(db).bitasset_data(db).options;
+      op.new_options.feed_lifetime_sec = lifetime;
+      op.new_options.extensions.value.price_oracle_id = oid;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Let the value age past its lifetime. No publishes, no updates -- only blocks.
+   generate_blocks( db.head_block_time() + fc::seconds( lifetime * 3 ) );
+   set_expiration( db, trx );
+
+   const auto now = db.head_block_time();
+
+   // The stored aggregate is untouched, because nothing recomputed it. That is precisely why
+   // asking current_value.valid() is not a freshness test.
+   BOOST_CHECK( oid(db).current_value.valid() );
+   BOOST_CHECK( !oid(db).is_value_live( now ) );
+
+   // The consumer must not be quoting it any more.
+   const auto& bad = mia_id(db).bitasset_data(db);
+   BOOST_CHECK_MESSAGE( bad.current_feed.settlement_price.is_null(),
+                        "the smartcoin is still quoting a price from an oracle that stopped "
+                        "publishing " << ( now - oid(db).current_value_time ).to_seconds()
+                        << "s ago, against a lifetime of " << lifetime << "s" );
+
+   // And it must STAY gone. This is the part the bug got wrong: update_expired_feeds() runs
+   // every block over expired feeds, so a resurrection would happen within one block of the
+   // check above and be invisible to a single assertion.
+   generate_blocks( db.head_block_time() + fc::seconds( lifetime * 2 ) );
+   set_expiration( db, trx );
+   BOOST_CHECK_MESSAGE(
+      mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null(),
+      "the dead oracle's price came back after further blocks" );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * The stamp itself: a bound feed carries the time the ORACLE VALUE was formed, not the time the
+ * feed happened to be refreshed. Getting this wrong is what let an expired feed be revived.
+ */
+BOOST_AUTO_TEST_CASE( a_bound_feed_is_stamped_with_the_oracle_value_time )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   const asset_object& mia = create_bitasset( "MIASTAMP", alice_id );
+   const auto mia_id = mia.get_id();
+
+   oracle_create_operation cop;
+   cop.owner       = alice_id;
+   cop.name        = "STAMP.CORE";
+   cop.base_asset  = mia_id;
+   cop.quote_asset = asset_id_type();
+   cop.options.producers[bob_id] = 1;
+   cop.options.minimum_producers = 1;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   {
+      oracle_publish_operation op;
+      op.producer  = bob_id;
+      op.oracle_id = oid;
+      op.value     = price( asset( 1, mia_id ), asset( 10, asset_id_type() ) );
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, oid );
+
+   const auto value_time = oid(db).current_value_time;
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed_publication_time == value_time );
+
+   // Move the head on WITHOUT publishing, then force a refresh. The stamp must still be the
+   // value's own time -- if it tracked head time, the feed's expiry would keep sliding.
+   generate_blocks( db.head_block_time() + fc::seconds( 30 ) );
+   set_expiration( db, trx );
+   BOOST_CHECK( db.head_block_time() > value_time );
+   BOOST_CHECK_EQUAL( mia_id(db).bitasset_data(db).current_feed_publication_time.sec_since_epoch(),
+                      value_time.sec_since_epoch() );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
