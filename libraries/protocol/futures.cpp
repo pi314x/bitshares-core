@@ -69,6 +69,10 @@ void futures_market_options::validate()const
               "otherwise a position is liquidatable the moment it is opened",
               ("m", maintenance_margin_ratio)("i", initial_margin_ratio) );
 
+   // A limit above 100%/second cannot bind on any real move and only reads as if it does.
+   FC_ASSERT( max_mark_move_ppm <= 1000000,
+              "Maximum mark move may not exceed 1000000 ppm (100%) per second" );
+
    FC_ASSERT( funding_interval_sec >= GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC,
               "Funding interval must be at least ${s} seconds",
               ("s", GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC) );
