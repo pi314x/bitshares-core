@@ -229,7 +229,8 @@ struct futures_fixture : database_fixture
    futures_market_id_type make_market( account_id_type owner, const fc::ecc::private_key& key,
                                        oracle_id_type oid, share_type contract_size,
                                        const optional<time_point_sec>& expiry = {},
-                                       const string& symbol = "BTC-PERP" )
+                                       const string& symbol = "BTC-PERP",
+                                       const optional<futures_market_options>& options = {} )
    {
       futures_market_create_operation op;
       op.owner            = owner;
@@ -238,6 +239,8 @@ struct futures_fixture : database_fixture
       op.collateral_asset = core_id;
       op.contract_size    = contract_size;
       op.expiry           = expiry;
+      if( options.valid() )
+         op.options       = *options;
       signed_transaction tx;
       tx.operations.push_back( op );
       db.current_fee_schedule().set_fee( tx.operations.back() );
@@ -476,6 +479,87 @@ BOOST_AUTO_TEST_CASE( expiry_must_be_in_the_future_and_within_range )
    // past its expiry a dated contract stops accepting trades
    BOOST_CHECK( !dated(db).is_tradable( *dated(db).expiry ) );
    BOOST_CHECK( !dated(db).is_tradable( *dated(db).expiry + 1 ) );
+} FC_LOG_AND_RETHROW() }
+
+
+/**
+ * The mark must not be whatever the oracle last said.
+ *
+ * It is the price margin, liquidation and settlement are all measured against, so an outlier
+ * print -- manipulated, or a genuine wick that reverts next block -- used to become the mark
+ * immediately and could cascade liquidations across every position before reverting.
+ *
+ * With a limit set, a spike is clipped to what the elapsed time allows and a move that is real
+ * still arrives in full, just over seconds instead of instantly.
+ */
+BOOST_AUTO_TEST_CASE( the_mark_is_rate_limited_when_a_limit_is_set )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100000 );
+
+   futures_market_options opts;
+   opts.max_mark_move_ppm = 1000;          // 0.1% of the mark per second
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-DAMP", opts );
+
+   BOOST_REQUIRE( mid(db).mark_price.valid() );
+   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 100000 );   // first mark is taken as-is
+
+   // A block later, publish a print twice the price. Five seconds at 0.1%/s allows 0.5%.
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 200000 );
+
+   const int64_t after_spike = mid(db).mark_price->value;
+   BOOST_CHECK_MESSAGE( after_spike < 102000,
+                        "a doubling print moved the mark to " << after_spike
+                        << "; the limit should have held it near 100500" );
+   BOOST_CHECK_GT( after_spike, 100000 );   // but it does move toward it
+
+   // The spike reverts. The mark never went anywhere near it.
+   publish( oid, bob_id, bob_private_key, 100000 );
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100000 );
+   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 100000 );
+
+   // A move that is real arrives in full: hold 110000 and let time pass.
+   for( int i = 0; i < 40; ++i )
+   {
+      generate_block();
+      set_expiration( db, trx );
+      publish( oid, bob_id, bob_private_key, 110000 );
+   }
+   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 110000 );
+} FC_LOG_AND_RETHROW() }
+
+/// Off by default: a market that sets no limit tracks the oracle exactly, as before.
+BOOST_AUTO_TEST_CASE( the_mark_is_undamped_when_no_limit_is_set )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100000 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+   BOOST_CHECK_EQUAL( mid(db).options.max_mark_move_ppm, 0u );
+
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 200000 );
+   BOOST_CHECK_EQUAL( mid(db).mark_price->value, 200000 );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -42,6 +42,56 @@ namespace graphene { namespace chain {
 share_type futures_ppm_of( share_type amount, uint32_t ppm );
 void accumulate_premium( database& d, const futures_market_object& market, share_type mark );
 
+/**
+ * Rate-limit how far the mark may move from where it already is.
+ *
+ * The oracle's aggregate is the target, not the answer. A single print becomes the price that
+ * margin, liquidation and settlement are all measured against, so an outlier that reverts in
+ * the next block can still cascade liquidations across every position in the market before it
+ * does. Producers aggregate across each other, but a market gets no say in that and inherits
+ * whatever aggregation its oracle happens to be configured for.
+ *
+ * The allowance is proportional to elapsed time, so a sustained move arrives in full -- just
+ * over seconds rather than instantly -- while a spike that reverts never lands. Elapsed is
+ * capped at the funding interval so a long silence cannot bank an unlimited allowance and hand
+ * the first publish afterwards a free hand.
+ *
+ * Always at least one unit, so a small mark can still converge rather than being frozen by
+ * integer rounding.
+ */
+share_type damp_mark( const futures_market_object& market, share_type target,
+                      time_point_sec now )
+{
+   if( 0 == market.options.max_mark_move_ppm || !market.mark_price.valid() )
+      return target;   // limit disabled, or there is no previous mark to move away from
+
+   const share_type previous = *market.mark_price;
+
+   int64_t elapsed = ( now - market.mark_price_time ).to_seconds();
+   if( elapsed < 0 )
+      elapsed = 0;
+   elapsed = std::min<int64_t>( elapsed, int64_t( market.options.funding_interval_sec ) );
+
+   fc::uint128_t allowed = ( fc::uint128_t( previous.value )
+                             * market.options.max_mark_move_ppm
+                             * uint64_t( elapsed ) + 999999 ) / 1000000;
+   if( allowed < 1 )
+      allowed = 1;
+   if( allowed > fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ) )
+      allowed = fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY );
+   const share_type allowance{ static_cast<int64_t>( allowed ) };
+
+   if( target > previous + allowance )
+      return previous + allowance;
+   if( target < previous - allowance )
+   {
+      // A mark of zero or less is not a price; the market reads it as having no mark at all.
+      const share_type floored = previous - allowance;
+      return floored > 0 ? floored : share_type( 1 );
+   }
+   return target;
+}
+
 void update_futures_mark_price( database& d, const futures_market_object& market )
 {
    const oracle_object* o = d.find( market.oracle_id );
@@ -58,7 +108,7 @@ void update_futures_mark_price( database& d, const futures_market_object& market
       // A contract whose whole notional rounds to zero cannot be margined or liquidated
       // meaningfully, so it is treated as no mark at all rather than as a price of nothing.
       if( in_collateral.amount > 0 )
-         new_mark = in_collateral.amount;
+         new_mark = damp_mark( market, in_collateral.amount, d.head_block_time() );
    }
 
    const auto now = d.head_block_time();
