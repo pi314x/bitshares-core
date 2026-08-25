@@ -619,6 +619,131 @@ BOOST_AUTO_TEST_CASE( only_the_owner_may_update_or_delete )
    BOOST_CHECK( nullptr == db.find( oid ) );
 } FC_LOG_AND_RETHROW() }
 
+/**
+ * ADVERSARIAL: the deviation filter inverts the oracle's security model.
+ *
+ * The filter drops any submission more than max_deviation_ppm away from the LAST PUBLISHED
+ * VALUE, and keeps the survivors whenever at least minimum_producers of them remain. When the
+ * real price makes a genuine move larger than the band, it is the HONEST producers who
+ * deviate -- they are reporting the new price -- while a producer that simply keeps repeating
+ * the old number sits comfortably inside the band and survives.
+ *
+ * So a minority holds the oracle. Below, four of five producers report a crash from 100 to 50
+ * and are all discarded; the single producer still saying 100 becomes the entire live set and
+ * therefore the median. Because current_value never moves, the band never moves either, and
+ * the capture persists for as long as the attacker keeps republishing.
+ *
+ * A median over five producers is supposed to survive two liars. With the filter enabled it
+ * does not survive one.
+ */
+BOOST_AUTO_TEST_CASE( the_deviation_filter_lets_a_minority_capture_the_price )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (owner)(p1)(p2)(p3)(p4)(mallory) );
+
+   oracle_options opts;
+   opts.producers[ p1_id ]      = 1;
+   opts.producers[ p2_id ]      = 1;
+   opts.producers[ p3_id ]      = 1;
+   opts.producers[ p4_id ]      = 1;
+   opts.producers[ mallory_id ] = 1;
+   opts.minimum_producers = 1;      // the shipped default
+   opts.max_deviation_ppm = 100000; // 10% band -- a plausible "manipulation resistance" setting
+   opts.aggregation = oracle_aggregation_method::median_of_latest;
+
+   const auto oid = make_oracle( owner_id, owner_private_key, "CORE.USD", opts );
+
+   // Everyone agrees the price is 100. (usd_per_core is 1/n, so a bigger n is a lower price.)
+   publish( oid, p1_id, p1_private_key, 100 );
+   publish( oid, p2_id, p2_private_key, 100 );
+   publish( oid, p3_id, p3_private_key, 100 );
+   publish( oid, p4_id, p4_private_key, 100 );
+   publish( oid, mallory_id, mallory_private_key, 100 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+
+   // The market moves hard. The four honest producers report it; mallory does not.
+   // A block between rounds keeps mallory's repeated submission from being a byte-identical
+   // transaction, which the chain would reject as a duplicate.
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, p1_id, p1_private_key, 200 );
+   publish( oid, p2_id, p2_private_key, 200 );
+   publish( oid, p3_id, p3_private_key, 200 );
+   publish( oid, p4_id, p4_private_key, 200 );
+   publish( oid, mallory_id, mallory_private_key, 100 );
+
+   // A four-of-five majority says 200. The oracle says 100.
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 100 ),
+                        "expected the stale minority value to win" );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 1 );
+
+   // And it is not a one-round lag: the band is anchored to a value mallory controls, so
+   // republishing the same number holds the oracle there indefinitely.
+   for( int round = 0; round < 5; ++round )
+   {
+      generate_block();
+      set_expiration( db, trx );
+      publish( oid, p1_id, p1_private_key, 200 );
+      publish( oid, p2_id, p2_private_key, 200 );
+      publish( oid, p3_id, p3_private_key, 200 );
+      publish( oid, p4_id, p4_private_key, 200 );
+      publish( oid, mallory_id, mallory_private_key, 100 );
+   }
+   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 1 );
+
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * The same oracle without the filter behaves as a median should: the honest majority wins
+ * immediately. The filter is the whole difference.
+ */
+BOOST_AUTO_TEST_CASE( without_the_deviation_filter_the_majority_wins )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (owner)(p1)(p2)(p3)(p4)(mallory) );
+
+   oracle_options opts;
+   opts.producers[ p1_id ]      = 1;
+   opts.producers[ p2_id ]      = 1;
+   opts.producers[ p3_id ]      = 1;
+   opts.producers[ p4_id ]      = 1;
+   opts.producers[ mallory_id ] = 1;
+   opts.minimum_producers = 1;
+   opts.max_deviation_ppm = 0;      // off
+   opts.aggregation = oracle_aggregation_method::median_of_latest;
+
+   const auto oid = make_oracle( owner_id, owner_private_key, "CORE.USD", opts );
+
+   publish( oid, p1_id, p1_private_key, 100 );
+   publish( oid, p2_id, p2_private_key, 100 );
+   publish( oid, p3_id, p3_private_key, 100 );
+   publish( oid, p4_id, p4_private_key, 100 );
+   publish( oid, mallory_id, mallory_private_key, 100 );
+
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, p1_id, p1_private_key, 200 );
+   publish( oid, p2_id, p2_private_key, 200 );
+   publish( oid, p3_id, p3_private_key, 200 );
+   publish( oid, p4_id, p4_private_key, 200 );
+   publish( oid, mallory_id, mallory_private_key, 100 );
+
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 5 );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
@@ -1258,5 +1383,6 @@ BOOST_AUTO_TEST_CASE( appending_price_oracle_id_did_not_shift_existing_extension
    BOOST_CHECK_EQUAL( int( *back.extensions.value.black_swan_response_method ), 1 );
    BOOST_CHECK( !back.extensions.value.initial_collateral_ratio.valid() );
 }
+
 
 BOOST_AUTO_TEST_SUITE_END()
