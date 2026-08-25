@@ -130,20 +130,42 @@ void oracle_object::update_current_value( time_point_sec now )
       return;
    }
 
-   if( options.max_deviation_ppm > 0 && current_value.valid() )
+   if( options.max_deviation_ppm > 0 && live.size() > 1 )
    {
+      // Anchor the band on THIS round's median, not on the previously published value.
+      //
+      // Anchoring on the previous output inverted the whole security model. On a genuine
+      // price move it is the HONEST producers who deviate -- they are the ones reporting the
+      // new price -- while a producer that simply repeats the old number sits inside the band
+      // and survives. The survivors then became the entire live set, so a single stale or
+      // malicious producer outvoted an honest majority; and because current_value never moved,
+      // neither did the band, so the capture held for as long as the attacker kept publishing.
+      // A five-producer median is supposed to survive two liars. It did not survive one.
+      //
+      // The round's own median is the robust anchor: it is the majority's number by
+      // construction, so it is the outlier that gets trimmed rather than the consensus.
+      vector<pair<price, uint32_t>> for_reference = live;
+      const price reference = weighted_median( for_reference );
+
       vector<pair<price, uint32_t>> kept;
       kept.reserve( live.size() );
+      uint64_t kept_weight = 0;
+      uint64_t live_weight = 0;
       for( const auto& e : live )
       {
-         if( !deviates_too_far( e.first, *current_value, options.max_deviation_ppm ) )
+         live_weight += e.second;
+         if( !deviates_too_far( e.first, reference, options.max_deviation_ppm ) )
+         {
             kept.push_back( e );
+            kept_weight += e.second;
+         }
       }
-      // Only filter while enough non-outliers remain to satisfy quorum. If excluding them
-      // would break quorum then every producer has moved together, which is what a real crash
-      // looks like -- and freezing the oracle at exactly that moment is the failure mode this
-      // rule exists to avoid.
-      if( kept.size() >= size_t( options.minimum_producers ) )
+
+      // Two conditions, both required. Quorum, as before -- and a strict majority of the live
+      // weight, so that the filter can only ever discard a minority. If the survivors are
+      // themselves a minority the producers genuinely disagree, and the median over all of
+      // them is a better answer than the median over one arbitrary cluster.
+      if( kept.size() >= size_t( options.minimum_producers ) && kept_weight * 2 > live_weight )
          live = std::move( kept );
    }
 

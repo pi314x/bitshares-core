@@ -44,6 +44,8 @@ namespace graphene { namespace protocol {
    /// 1% of notional. Well above any venue's taker fee, and low enough that a market
    /// cannot be configured to consume a position through trading costs alone.
    constexpr uint32_t GRAPHENE_FUTURES_MAX_TRADING_FEE_PPM = 10000;
+   /// Bounds the book walk a single premium sample can cause.
+   constexpr uint32_t GRAPHENE_FUTURES_MAX_IMPACT_SIZE = 1000000;
 
    constexpr uint32_t GRAPHENE_FUTURES_MIN_FUNDING_INTERVAL_SEC = 60;
 
@@ -111,6 +113,26 @@ namespace graphene { namespace protocol {
       /// Perpetuals only, ignored by dated contracts.
       uint32_t funding_interval_sec = 28800;   // 8 hours, the common venue default
       uint32_t max_funding_rate_ppm = 750;     // 0.075% per interval
+
+      /**
+       * Contracts the funding premium is priced over: the IMPACT size.
+       *
+       * The premium used to be sampled from the mid of best bid and best ask, with no regard
+       * for the size behind either quote. Two one-contract orders therefore moved the funding
+       * rate exactly as far as two million-contract orders would, so anyone holding a position
+       * could bracket the book with a single contract a side and collect the capped rate on
+       * their whole position -- paid by the other side, and risking only the one contract that
+       * was actually exposed.
+       *
+       * Sampling the volume-weighted price of filling this many contracts instead means moving
+       * the rate requires moving real depth, and the cost of doing so scales with impact_size
+       * rather than staying flat at one contract. This is what BitMEX and Binance do, and for
+       * the same reason.
+       *
+       * A thin side is priced over whatever depth exists rather than being skipped: that is the
+       * honest reading of a thin book, and it is still strictly harder to move than one quote.
+       */
+      uint32_t impact_size = 10;
 
       /**
        * Share of a liquidated position's notional kept as a penalty, in GRAPHENE_100_PERCENT
@@ -364,7 +386,7 @@ namespace graphene { namespace protocol {
 FC_REFLECT( graphene::protocol::futures_market_options,
             (initial_margin_ratio)(maintenance_margin_ratio)(max_mark_move_ppm)
             (taker_fee_ppm)(maker_rebate_ppm)
-            (funding_interval_sec)(max_funding_rate_ppm)
+            (funding_interval_sec)(max_funding_rate_ppm)(impact_size)
             (liquidation_penalty_ratio)(enabled)(extensions) )
 
 FC_REFLECT( graphene::protocol::futures_position_adjust_margin_operation::fee_params_t, (fee) )

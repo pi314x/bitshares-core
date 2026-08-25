@@ -1927,29 +1927,27 @@ BOOST_AUTO_TEST_CASE( no_funding_accrues_without_a_two_sided_book )
 
 
 /**
- * ADVERSARIAL: the funding rate is set by the mid of best bid and best ask, with no regard
- * for how much size stands behind either. Two one-contract orders therefore move the funding
- * input as far as two million-contract orders would.
+ * REGRESSION: two one-contract orders must not set the funding rate for the whole market.
  *
- * That turns funding into a subsidy an attacker can direct at their own book. Here the
- * attacker holds a large short, brackets the market with a single contract on each side, and
- * collects the capped funding rate on the whole short from the longs -- while risking only
- * the one contract that is actually exposed.
+ * The premium used to be sampled from the mid of best bid and best ask with no regard for the
+ * size behind either quote, so a holder could bracket the book with a single contract a side
+ * and collect the capped rate on an arbitrarily large position -- paid by the other side, and
+ * risking only the one contract actually exposed. Here mallory holds a 500-contract short and
+ * tries exactly that.
  *
- * State of the art is to sample an IMPACT price: the volume-weighted price of filling a fixed
- * notional, so that moving the index requires moving real depth. BitMEX and Binance both do
- * this, precisely because a top-of-book quote is cheap to distort. See ORACLE-DESIGN.md.
+ * With the premium priced over impact_size contracts of real depth, her two contracts are
+ * diluted by the genuine orders resting at the mark, and the rate barely moves.
  */
-BOOST_AUTO_TEST_CASE( funding_is_set_by_top_of_book_regardless_of_size )
+BOOST_AUTO_TEST_CASE( a_one_contract_quote_cannot_set_the_funding_rate )
 { try {
    generate_blocks( HARDFORK_FUTURES_TIME );
    generate_block();
    set_expiration( db, trx );
    setup_assets();
 
-   ACTORS( (alice)(bob)(mallory) );
+   ACTORS( (alice)(bob)(carol)(mallory) );
    fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
-   fund( mallory, asset(100000000) );
+   fund( carol, asset(100000000) ); fund( mallory, asset(100000000) );
 
    const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
    publish( oid, bob_id, bob_private_key, 100 );
@@ -1962,6 +1960,7 @@ BOOST_AUTO_TEST_CASE( funding_is_set_by_top_of_book_regardless_of_size )
    cop.contract_size    = 1;
    cop.options.funding_interval_sec = 60;
    cop.options.max_funding_rate_ppm = 10000;   // 1% per interval
+   cop.options.impact_size          = 10;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
    db.current_fee_schedule().set_fee( ctx.operations.back() );
@@ -1970,15 +1969,18 @@ BOOST_AUTO_TEST_CASE( funding_is_set_by_top_of_book_regardless_of_size )
    const futures_market_id_type mid {
       PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
 
-   // Genuine two-sided interest at the mark: bob long 500, mallory short 500.
+   // Genuine two-sided interest: bob long 500, mallory short 500.
    place( mid, bob_id, bob_private_key, true, 100, 500 );
    place( mid, mallory_id, mallory_private_key, false, 100, 500 );
    const auto bob_pos     = position_of( mid, bob_id )->get_id();
    const auto mallory_pos = position_of( mid, mallory_id )->get_id();
    BOOST_CHECK_EQUAL( mallory_pos(db).size.value, -500 );
 
-   // Mallory brackets the book with ONE contract a side, above the mark of 100.
-   // Nothing else is resting, so these two orders alone define the mid.
+   // Real depth at the mark from a third party, on both sides.
+   place( mid, carol_id, carol_private_key, true, 99, 20 );
+   place( mid, alice_id, alice_private_key, false, 101, 20 );
+
+   // Mallory brackets the book with ONE contract a side, far above the mark of 100.
    place( mid, mallory_id, mallory_private_key, true, 104, 1 );
    place( mid, mallory_id, mallory_private_key, false, 108, 1 );
 
@@ -1986,9 +1988,9 @@ BOOST_AUTO_TEST_CASE( funding_is_set_by_top_of_book_regardless_of_size )
    set_expiration( db, trx );
    publish( oid, bob_id, bob_private_key, 100 );
 
-   // Mid is 106 against a mark of 100: a premium of 6, clamped to the 1% cap of 1.
-   // Two contracts of quoted size set the rate for a 500-contract open interest.
-   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 1 );
+   // Impact bid over 10 contracts: one at 104 then nine at 99 -> 99. Impact ask: one at 108
+   // then nine at 101 -> 101. Mid 100, which is the mark. Her two contracts moved nothing.
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 0 );
 
    const auto bob_before     = bob_pos(db).margin;
    const auto mallory_before = mallory_pos(db).margin;
@@ -1996,15 +1998,71 @@ BOOST_AUTO_TEST_CASE( funding_is_set_by_top_of_book_regardless_of_size )
    adjust_margin( bob_pos,     bob_id,     bob_private_key,     10000 );
    adjust_margin( mallory_pos, mallory_id, mallory_private_key, 10000 );
 
-   const auto bob_paid      = 10000 - ( bob_pos(db).margin - bob_before ).value;
-   const auto mallory_gained = ( mallory_pos(db).margin - mallory_before ).value - 10000;
+   BOOST_CHECK_EQUAL( ( bob_pos(db).margin - bob_before ).value, 10000 );
+   BOOST_CHECK_EQUAL( ( mallory_pos(db).margin - mallory_before ).value, 10000 );
 
-   // The long pays 500 and the short receives 500, off two contracts of quoting.
-   BOOST_CHECK_EQUAL( bob_paid, 500 );
-   BOOST_CHECK_EQUAL( mallory_gained, 500 );
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
 
-   // The exposure that bought that transfer is one contract, six above the mark.
-   BOOST_CHECK_LT( 6, mallory_gained );
+/**
+ * The rate still responds when the whole impact depth genuinely trades away from the mark.
+ * Manipulation resistance that also stopped real premia from registering would be worse than
+ * the bug it replaced.
+ */
+BOOST_AUTO_TEST_CASE( funding_still_responds_to_a_genuinely_skewed_book )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
+   fund( carol, asset(100000000) ); fund( dan, asset(100000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;
+   cop.options.max_funding_rate_ppm = 10000;
+   cop.options.impact_size          = 10;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto bob_pos   = position_of( mid, bob_id )->get_id();
+   const auto carol_pos = position_of( mid, carol_id )->get_id();
+
+   // A full impact size of depth on each side, genuinely above the mark.
+   place( mid, dan_id, dan_private_key, true, 104, 10 );
+   place( mid, alice_id, alice_private_key, false, 108, 10 );
+
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   // Impact mid is 106 against a mark of 100: a premium of 6, clamped to the 1% cap of 1.
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 1 );
+
+   const auto bob_before   = bob_pos(db).margin;
+   const auto carol_before = carol_pos(db).margin;
+   adjust_margin( bob_pos,   bob_id,   bob_private_key,   1000 );
+   adjust_margin( carol_pos, carol_id, carol_private_key, 1000 );
+
+   BOOST_CHECK_EQUAL( ( bob_pos(db).margin - bob_before ).value, 1000 - 10 );
+   BOOST_CHECK_EQUAL( ( carol_pos(db).margin - carol_before ).value, 1000 + 10 );
 
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
