@@ -12,6 +12,10 @@
 #include <graphene/protocol/authority.hpp>
 #include <graphene/protocol/transaction.hpp>
 #include <graphene/protocol/block.hpp>
+#include <graphene/protocol/address.hpp>
+#include <graphene/protocol/transfer.hpp>
+
+#include <fc/crypto/pqc.hpp>
 
 #include <fc/io/raw.hpp>
 #include <fc/crypto/sha256.hpp>
@@ -292,6 +296,94 @@ BOOST_AUTO_TEST_CASE( signed_block_dual_format )
       signed_block b2 = fc::raw::unpack<signed_block>( current );
       BOOST_CHECK( b2.witness_pq_signature.valid() == true );
       BOOST_CHECK( fc::raw::pack( b2 ) == current );
+   }
+}
+
+
+/**
+ * An address auth must be satisfiable by a post-quantum key.
+ *
+ * address_auths names a 20-byte hash, not a key type, but the signature checker only ever
+ * derived addresses from secp256k1 keys -- so an account protected by address_auths could
+ * never be moved to post-quantum keys at all. It would stay quantum-vulnerable no matter what
+ * else it did, and nothing in the interface said so.
+ *
+ * The derivation is the classic one, ripemd160(sha512(bytes)), over the key's identity: the
+ * algorithm followed by the raw public key. The algorithm is in there so two parameter sets
+ * cannot land on the same address, and the optional legacy companion key is not, so attaching
+ * one does not move where the PQ key lives.
+ */
+BOOST_AUTO_TEST_CASE( an_address_auth_can_be_satisfied_by_a_pq_key )
+{
+   const auto priv = fc::pq_private_key::generate( fc::pq_algorithm::ml_dsa_65 );
+   const pq_public_key_type pub( priv.get_public_key() );
+   const address a( pub );
+
+   // Deterministic, and distinct from a different key's.
+   BOOST_CHECK( address( pub ) == a );
+   const auto other = fc::pq_private_key::generate( fc::pq_algorithm::ml_dsa_65 );
+   BOOST_CHECK( address( pq_public_key_type( other.get_public_key() ) ) != a );
+
+   // Attaching a legacy companion key must NOT move the address: it is a migration
+   // convenience, not part of which key this is.
+   pq_public_key_type hybrid = pub;
+   hybrid.legacy = fc::ecc::private_key::generate().get_public_key().serialize();
+   BOOST_CHECK( address( hybrid ) == a );
+
+   // The parameter set is part of the identity, so the same bytes under a different
+   // algorithm must land somewhere else.
+   pq_public_key_type relabelled = pub;
+   relabelled.algorithm = fc::pq_algorithm::ml_dsa_87;
+   BOOST_CHECK( address( relabelled ) != a );
+
+   // Now the authority itself. An account whose active authority is an address_auth
+   // naming that address must be movable by the PQ key alone.
+   authority auth;
+   auth.weight_threshold = 1;
+   auth.address_auths[ a ] = 1;
+
+   transfer_operation op;
+   op.from = account_id_type(17);
+   op.to   = account_id_type(18);
+   op.amount = asset( 1 );
+
+   const chain_id_type chain_id = fc::sha256::hash( std::string( "pq-address-test" ) );
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   {
+      fc::raw::scoped_pq_format fmt( fc::raw::pq_format::current );
+      tx.sign_pq( priv, chain_id, fc::raw::pq_format::current );
+      BOOST_REQUIRE_EQUAL( tx.pq_signatures.size(), 1u );
+
+      const auto get_active = [&auth]( account_id_type ) { return &auth; };
+      const auto get_owner  = [&auth]( account_id_type ) { return &auth; };
+      const auto get_custom = []( account_id_type, const operation&, rejected_predicate_map* )
+                              { return vector<authority>(); };
+
+      BOOST_CHECK_NO_THROW( tx.verify_authority( chain_id, get_active, get_owner, get_custom,
+                                                 true, true ) );
+
+      // The same authority is NOT satisfied by an unrelated PQ key.
+      signed_transaction wrong;
+      wrong.operations.push_back( op );
+      wrong.sign_pq( other, chain_id, fc::raw::pq_format::current );
+      BOOST_CHECK_THROW( wrong.verify_authority( chain_id, get_active, get_owner, get_custom,
+                                                    true, true ), fc::exception );
+
+      flat_set<pq_public_key_type> pq_keys;
+      for( const auto& sig : tx.pq_signatures ) pq_keys.insert( sig.key );
+
+      // And with allow_pq off -- which is what the pre-hardfork path passes -- the PQ
+      // signature is not considered at all, so the very same transaction fails.
+      BOOST_CHECK_THROW(
+         graphene::protocol::verify_authority( tx.operations, flat_set<public_key_type>(),
+                                               get_active, get_owner, get_custom, true, true,
+                                               GRAPHENE_MAX_SIG_CHECK_DEPTH, false,
+                                               false /* allow_pq */,
+                                               flat_set<account_id_type>(),
+                                               flat_set<account_id_type>(),
+                                               pq_keys ),
+         fc::exception );
    }
 }
 

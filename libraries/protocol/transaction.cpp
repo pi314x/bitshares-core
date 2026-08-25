@@ -173,6 +173,9 @@ struct sign_state
       }
 
       optional<map<address,public_key_type>> available_address_sigs;
+      /// Addresses of the PQ signatures actually provided. Only ever populated when PQ
+      /// signatures are allowed at all, which is what keeps pre-hardfork behaviour identical.
+      optional<map<address,pq_public_key_type>> provided_pq_address_sigs;
       optional<map<address,public_key_type>> provided_address_sigs;
 
       bool signed_by( const address& a ) {
@@ -193,7 +196,24 @@ struct sign_state
              (*provided_address_sigs)[ address(pts_address(item.first, true, 0) ) ] = item.first;
              (*provided_address_sigs)[ address(item.first) ] = item.first;
             }
+
+            // An address auth names a hash, not a key type. A PQ key hashing to that address
+            // satisfies it exactly as a classic key does -- otherwise an account protected by
+            // address_auths could never be moved to post-quantum keys at all, and would stay
+            // quantum-vulnerable no matter what else it did.
+            //
+            // Only the pts_address variants are omitted: those encode a secp256k1-specific
+            // legacy format from the PTS import and have no meaning for an ML-DSA key.
+            provided_pq_address_sigs = std::map<address,pq_public_key_type>();
+            for( auto& item : provided_pq_signatures )
+             (*provided_pq_address_sigs)[ address(item.first) ] = item.first;
          }
+         // A PQ signature satisfying this address counts before anything else is considered:
+         // it is a signature that was actually provided, which is the strongest evidence here.
+         auto pq_itr = provided_pq_address_sigs->find(a);
+         if( pq_itr != provided_pq_address_sigs->end() )
+            return provided_pq_signatures[pq_itr->second] = true;
+
          auto itr = provided_address_sigs->find(a);
          if( itr == provided_address_sigs->end() )
          {
@@ -204,6 +224,13 @@ struct sign_state
                   return provided_signatures[aitr->second] = true;
                return false;
             }
+            // Nothing provided and nothing available: the address is simply not signed for.
+            // Upstream falls through to the line below and dereferences an end() iterator,
+            // which is undefined behaviour that happens to yield `true` on libstdc++ -- i.e.
+            // it would report an unsigned address auth as satisfied. Unreachable today,
+            // because account_create/account_update::validate() reject address_auths outright
+            // so no account can carry one, but it is on the path this test exercises.
+            return false;
          }
          return provided_signatures[itr->second] = true;
       }
