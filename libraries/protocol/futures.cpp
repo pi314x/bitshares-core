@@ -89,6 +89,12 @@ void futures_market_options::validate()const
    FC_ASSERT( max_funding_rate_ppm <= GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM,
               "Maximum funding rate may not exceed ${m} ppm per interval",
               ("m", GRAPHENE_FUTURES_MAX_FUNDING_RATE_PPM) );
+   // Zero would price the premium over an empty walk and divide by nothing. One reproduces the
+   // top-of-book sampling this option exists to replace, so it is not offered either.
+   FC_ASSERT( impact_size > 1, "Impact size must be greater than one contract" );
+   FC_ASSERT( impact_size <= GRAPHENE_FUTURES_MAX_IMPACT_SIZE,
+              "Impact size may not exceed ${m} contracts",
+              ("m", GRAPHENE_FUTURES_MAX_IMPACT_SIZE) );
 
    // A penalty at or above the maintenance requirement would take more than the position has
    // left at the moment it is liquidated, leaving the owner owing money.

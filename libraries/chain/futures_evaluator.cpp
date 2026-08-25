@@ -171,8 +171,48 @@ optional<share_type> sample_premium( const database& d, const futures_market_obj
    if( bid_end == bid_begin || ask_itr == ask_end )
       return {};
 
-   --bid_end;
-   const share_type mid = ( bid_end->price_per_contract + ask_itr->price_per_contract ) / 2;
+   // Volume-weighted price of filling up to `want` contracts, walking outward from the best
+   // price on each side: the IMPACT price.
+   //
+   // Sampling this rather than the top of book is what makes the funding rate cost something
+   // to move. With a plain mid, two one-contract orders shifted the rate as far as two
+   // million-contract orders would, so a holder could bracket the book with a single contract
+   // a side and collect the capped rate on an arbitrarily large position while risking one
+   // contract. Here the attacker has to own the first impact_size contracts of depth and stay
+   // exposed on all of them, so the cost of moving the rate scales with impact_size.
+   //
+   // A side holding less than `want` is priced over the depth that exists rather than being
+   // skipped: skipping would hand a thin market a premium of zero, which is its own
+   // manipulation -- an attacker could suppress funding by pulling one side.
+   const int64_t want = std::max<int64_t>( 1, int64_t( market.options.impact_size ) );
+
+   // Bids ascend by price, so the best bid is the last entry and further depth lies backwards.
+   fc::uint128_t bid_notional = 0;
+   int64_t bid_filled = 0;
+   for( auto b = bid_end; b != bid_begin && bid_filled < want; )
+   {
+      --b;
+      const int64_t take = std::min<int64_t>( b->size.value, want - bid_filled );
+      bid_notional += fc::uint128_t( b->price_per_contract.value ) * uint64_t( take );
+      bid_filled   += take;
+   }
+
+   // Asks ascend by price, so the best ask is the first entry and further depth lies forwards.
+   fc::uint128_t ask_notional = 0;
+   int64_t ask_filled = 0;
+   for( auto a = ask_itr; a != ask_end && ask_filled < want; ++a )
+   {
+      const int64_t take = std::min<int64_t>( a->size.value, want - ask_filled );
+      ask_notional += fc::uint128_t( a->price_per_contract.value ) * uint64_t( take );
+      ask_filled   += take;
+   }
+
+   // Both are at least one: the emptiness of either side was ruled out above, and an order
+   // that reached the book carries at least one contract.
+   const share_type impact_bid{ static_cast<int64_t>( bid_notional / uint64_t( bid_filled ) ) };
+   const share_type impact_ask{ static_cast<int64_t>( ask_notional / uint64_t( ask_filled ) ) };
+
+   const share_type mid = ( impact_bid + impact_ask ) / 2;
    share_type premium = mid - mark;
 
    // Clamp each SAMPLE, not just the final average. It bounds the average by construction, and

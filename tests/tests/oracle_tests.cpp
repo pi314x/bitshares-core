@@ -620,23 +620,20 @@ BOOST_AUTO_TEST_CASE( only_the_owner_may_update_or_delete )
 } FC_LOG_AND_RETHROW() }
 
 /**
- * ADVERSARIAL: the deviation filter inverts the oracle's security model.
+ * REGRESSION: the deviation filter must not let a minority capture the price.
  *
- * The filter drops any submission more than max_deviation_ppm away from the LAST PUBLISHED
- * VALUE, and keeps the survivors whenever at least minimum_producers of them remain. When the
- * real price makes a genuine move larger than the band, it is the HONEST producers who
- * deviate -- they are reporting the new price -- while a producer that simply keeps repeating
- * the old number sits comfortably inside the band and survives.
+ * The filter drops submissions far from a reference and keeps the survivors. It used to
+ * reference the LAST PUBLISHED VALUE, which inverted the security model: on a genuine price
+ * move it is the HONEST producers who deviate -- they are reporting the new price -- while a
+ * producer repeating the old number sits inside the band and survives. The survivors became
+ * the entire live set, so one stale producer outvoted an honest majority; and because
+ * current_value never moved, neither did the band, so the capture held indefinitely.
  *
- * So a minority holds the oracle. Below, four of five producers report a crash from 100 to 50
- * and are all discarded; the single producer still saying 100 becomes the entire live set and
- * therefore the median. Because current_value never moves, the band never moves either, and
- * the capture persists for as long as the attacker keeps republishing.
- *
- * A median over five producers is supposed to survive two liars. With the filter enabled it
- * does not survive one.
+ * The reference is now the round's own weighted median, which is the majority's number by
+ * construction, so the outlier is what gets trimmed. Four of five producers report a move
+ * from 100 to 200 and win immediately; mallory, still saying 100, is the one dropped.
  */
-BOOST_AUTO_TEST_CASE( the_deviation_filter_lets_a_minority_capture_the_price )
+BOOST_AUTO_TEST_CASE( the_deviation_filter_cannot_let_a_minority_capture_the_price )
 { try {
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
@@ -677,11 +674,11 @@ BOOST_AUTO_TEST_CASE( the_deviation_filter_lets_a_minority_capture_the_price )
    publish( oid, p4_id, p4_private_key, 200 );
    publish( oid, mallory_id, mallory_private_key, 100 );
 
-   // A four-of-five majority says 200. The oracle says 100.
+   // The band is anchored on this round's median, so mallory is the outlier and is trimmed.
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 100 ),
-                        "expected the stale minority value to win" );
-   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 1 );
+   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 200 ),
+                        "the honest majority must win" );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 4 );
 
    // And it is not a one-round lag: the band is anchored to a value mallory controls, so
    // republishing the same number holds the oracle there indefinitely.
@@ -695,8 +692,8 @@ BOOST_AUTO_TEST_CASE( the_deviation_filter_lets_a_minority_capture_the_price )
       publish( oid, p4_id, p4_private_key, 200 );
       publish( oid, mallory_id, mallory_private_key, 100 );
    }
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
-   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 1 );
+   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 4 );
 
 } FC_LOG_AND_RETHROW() }
 
