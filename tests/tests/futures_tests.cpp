@@ -1925,4 +1925,88 @@ BOOST_AUTO_TEST_CASE( no_funding_accrues_without_a_two_sided_book )
    BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 0 );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * ADVERSARIAL: the funding rate is set by the mid of best bid and best ask, with no regard
+ * for how much size stands behind either. Two one-contract orders therefore move the funding
+ * input as far as two million-contract orders would.
+ *
+ * That turns funding into a subsidy an attacker can direct at their own book. Here the
+ * attacker holds a large short, brackets the market with a single contract on each side, and
+ * collects the capped funding rate on the whole short from the longs -- while risking only
+ * the one contract that is actually exposed.
+ *
+ * State of the art is to sample an IMPACT price: the volume-weighted price of filling a fixed
+ * notional, so that moving the index requires moving real depth. BitMEX and Binance both do
+ * this, precisely because a top-of-book quote is cheap to distort. See ORACLE-DESIGN.md.
+ */
+BOOST_AUTO_TEST_CASE( funding_is_set_by_top_of_book_regardless_of_size )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(mallory) );
+   fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
+   fund( mallory, asset(100000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;
+   cop.options.max_funding_rate_ppm = 10000;   // 1% per interval
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // Genuine two-sided interest at the mark: bob long 500, mallory short 500.
+   place( mid, bob_id, bob_private_key, true, 100, 500 );
+   place( mid, mallory_id, mallory_private_key, false, 100, 500 );
+   const auto bob_pos     = position_of( mid, bob_id )->get_id();
+   const auto mallory_pos = position_of( mid, mallory_id )->get_id();
+   BOOST_CHECK_EQUAL( mallory_pos(db).size.value, -500 );
+
+   // Mallory brackets the book with ONE contract a side, above the mark of 100.
+   // Nothing else is resting, so these two orders alone define the mid.
+   place( mid, mallory_id, mallory_private_key, true, 104, 1 );
+   place( mid, mallory_id, mallory_private_key, false, 108, 1 );
+
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   // Mid is 106 against a mark of 100: a premium of 6, clamped to the 1% cap of 1.
+   // Two contracts of quoted size set the rate for a 500-contract open interest.
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 1 );
+
+   const auto bob_before     = bob_pos(db).margin;
+   const auto mallory_before = mallory_pos(db).margin;
+
+   adjust_margin( bob_pos,     bob_id,     bob_private_key,     10000 );
+   adjust_margin( mallory_pos, mallory_id, mallory_private_key, 10000 );
+
+   const auto bob_paid      = 10000 - ( bob_pos(db).margin - bob_before ).value;
+   const auto mallory_gained = ( mallory_pos(db).margin - mallory_before ).value - 10000;
+
+   // The long pays 500 and the short receives 500, off two contracts of quoting.
+   BOOST_CHECK_EQUAL( bob_paid, 500 );
+   BOOST_CHECK_EQUAL( mallory_gained, 500 );
+
+   // The exposure that bought that transfer is one contract, six above the mark.
+   BOOST_CHECK_LT( 6, mallory_gained );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
