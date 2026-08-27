@@ -2067,4 +2067,267 @@ BOOST_AUTO_TEST_CASE( funding_still_responds_to_a_genuinely_skewed_book )
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * OEKONOMIE: wie weit darf sich der Mark bewegen, bevor der Versicherungsfonds nicht mehr
+ * reicht?
+ *
+ * Die vorhandenen Tests zeigen, DASS Bankrott sozialisiert wird. Was sie nicht sagen, ist
+ * ab welcher Bewegung das passiert und wie gross der Fehlbetrag dann ist -- genau die Zahl,
+ * an der die Fondsdimensionierung haengt. Der Test misst sie, statt sie zu behaupten.
+ *
+ * Aufbau: eine Position auf dem Erhaltungsminimum, dann der Mark schrittweise gegen sie.
+ * Gemessen wird, bei welchem Prozentsatz das Eigenkapital negativ wird -- ab da traegt der
+ * Fonds, und darueber die Gegenseite.
+ */
+BOOST_AUTO_TEST_CASE( measure_the_move_that_exhausts_a_position )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(100000000) ); fund( bob, asset(100000000) );
+   fund( carol, asset(100000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.initial_margin_ratio     = 1000;   // 10x
+   cop.options.maintenance_margin_ratio = 500;    // 5%
+   cop.options.max_mark_move_ppm        = 0;      // fuer die Messung ungedaempft
+   cop.options.funding_interval_sec     = 86400;  // haelt Funding aus der Messung heraus
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   place( mid, bob_id, bob_private_key, true, 100, 100 );
+   place( mid, carol_id, carol_private_key, false, 100, 100 );
+   const auto bob_pos = position_of( mid, bob_id )->get_id();
+   const auto notional = 100 * 100;   // 100 Kontrakte zu Mark 100
+
+   BOOST_TEST_MESSAGE( "  Notional " << notional
+                       << ", Anfangsmarge " << bob_pos(db).margin.value
+                       << " (" << (bob_pos(db).margin.value * 100 / notional) << "% des Notionals)" );
+
+   int wiped_at = 0;
+   for( int pct = 1; pct <= 30 && 0 == wiped_at; ++pct )
+   {
+      generate_block();
+      set_expiration( db, trx );
+      publish( oid, bob_id, bob_private_key, 100 - pct );   // Mark faellt gegen den Long
+      const auto* p = position_of( mid, bob_id );
+      if( nullptr == p ) break;
+      const share_type mark = *mid(db).mark_price;
+      const share_type eq = p->equity( mark );
+      if( pct <= 12 || eq <= 0 )
+         BOOST_TEST_MESSAGE( "  -" << pct << "%  Mark " << mark.value
+                             << "  Eigenkapital " << eq.value );
+      if( eq <= 0 ) wiped_at = pct;
+   }
+
+   BOOST_TEST_MESSAGE( "  ==> Eigenkapital erschoepft bei -" << wiped_at << "%" );
+   // Bei 10x Hebel muss das Eigenkapital ungefaehr bei der Anfangsmarge aufgebraucht sein,
+   // also nahe 10%. Deutlich frueher hiesse, dass Gebuehren oder Rundung Marge fressen;
+   // deutlich spaeter, dass die Marge nicht das ist, was sie zu sein vorgibt.
+   BOOST_CHECK_MESSAGE( wiped_at >= 9 && wiped_at <= 12,
+                        "Eigenkapital bei -" + std::to_string( wiped_at )
+                        + "% erschoepft, erwartet 9-12%" );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * OEKONOMIE: eine Kaskade. Mehrere Positionen mit unterschiedlichem Hebel, eine einzige
+ * Bewegung, die sie gemeinsam unter Wasser setzt.
+ *
+ * Geprueft wird nicht, ob eine einzelne Liquidation funktioniert -- das tun andere Tests --
+ * sondern ob der Markt danach noch aufgeht: Summe der Positionsgroessen null, Open Interest
+ * stimmig, und aus dem Nichts entstandener Wert nirgends.
+ */
+BOOST_AUTO_TEST_CASE( a_cascade_leaves_the_market_balanced )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan)(erin) );
+   for( auto a : {alice_id, bob_id, carol_id, dan_id, erin_id} )
+      fund( a(db), asset(200000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.initial_margin_ratio     = 1000;
+   cop.options.maintenance_margin_ratio = 500;
+   cop.options.max_mark_move_ppm        = 0;
+   cop.options.funding_interval_sec     = 86400;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // Drei Longs unterschiedlicher Groesse gegen einen Short.
+   place( mid, bob_id,   bob_private_key,   true, 100, 50 );
+   place( mid, carol_id, carol_private_key, false, 100, 50 );
+   place( mid, dan_id,   dan_private_key,   true, 100, 30 );
+   place( mid, carol_id, carol_private_key, false, 100, 30 );
+   place( mid, erin_id,  erin_private_key,  true, 100, 20 );
+   place( mid, carol_id, carol_private_key, false, 100, 20 );
+
+   BOOST_TEST_MESSAGE( "  Open Interest vor der Bewegung: " << mid(db).open_interest.value );
+   check_market_is_balanced( mid );
+
+   const auto fund_before = mid(db).insurance_fund;
+
+   generate_block();
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 80 );   // -20%: alle drei Longs unter Wasser
+
+   BOOST_TEST_MESSAGE( "  Mark auf 80 (-20%), Fonds vorher " << fund_before.value );
+
+   int liquidated = 0;
+   for( auto who : {bob_id, dan_id, erin_id} )
+   {
+      const auto* p = position_of( mid, who );
+      if( nullptr == p ) continue;
+      const auto pid = p->get_id();
+      generate_block();
+      set_expiration( db, trx );
+      try {
+         liquidate( pid, alice_id, alice_private_key );
+         ++liquidated;
+      } catch( const fc::exception& e ) {
+         BOOST_TEST_MESSAGE( "  Liquidation abgelehnt: "
+                             << e.to_string().substr( 0, 90 ) );
+      }
+   }
+   BOOST_TEST_MESSAGE( "  liquidiert: " << liquidated << " von 3" );
+   BOOST_TEST_MESSAGE( "  Fonds nachher: " << mid(db).insurance_fund.value
+                       << "  (Veraenderung " << ( mid(db).insurance_fund - fund_before ).value << ")" );
+
+   // Der eigentliche Punkt: nach der Kaskade muss der Markt noch aufgehen.
+   check_market_is_balanced( mid );
+   BOOST_CHECK_MESSAGE( liquidated > 0, "keine einzige Liquidation ging durch" );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * OEKONOMIE: kann aufgelaufenes Funding allein eine Position liquidierbar machen?
+ *
+ * Der Satz ist pro Intervall gedeckelt, aber er laeuft auf. Bei 0,075% je acht Stunden sind
+ * das rund 0,225% am Tag; gegen eine Marge von 10% des Notionals ist die Frage, nach wie
+ * vielen Intervallen die Position faellt, ohne dass sich der Markt bewegt hat.
+ */
+BOOST_AUTO_TEST_CASE( measure_how_long_funding_alone_takes_to_drain_a_position )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   for( auto a : {alice_id, bob_id, carol_id, dan_id} )
+      fund( a(db), asset(200000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.initial_margin_ratio     = 1000;
+   cop.options.maintenance_margin_ratio = 500;
+   cop.options.max_mark_move_ppm        = 0;
+   cop.options.funding_interval_sec     = 60;      // damit der Test Intervalle durchlaufen kann
+   cop.options.max_funding_rate_ppm     = 10000;   // 1% je Intervall, der zugelassene Hoechstwert
+   cop.options.impact_size              = 2;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   place( mid, bob_id,   bob_private_key,   true, 100, 100 );
+   place( mid, carol_id, carol_private_key, false, 100, 100 );
+   const auto bob_pos = position_of( mid, bob_id )->get_id();
+
+   // Ein Buch dauerhaft ueber dem Mark, mit echter Tiefe, damit der Satz am Deckel klebt
+   // und der Long zahlt.
+   place( mid, dan_id,   dan_private_key,   true, 108, 5 );
+   place( mid, alice_id, alice_private_key, false, 112, 5 );
+
+   const auto margin0 = bob_pos(db).margin;
+   BOOST_TEST_MESSAGE( "  Marge zu Beginn: " << margin0.value );
+
+   int intervals = 0;
+   for( ; intervals < 40; ++intervals )
+   {
+      generate_blocks( db.head_block_time() + 70 );
+      set_expiration( db, trx );
+      publish( oid, bob_id, bob_private_key, 100 );   // Mark unveraendert
+      const auto* p = position_of( mid, bob_id );
+      if( nullptr == p ) break;
+      // Verhaltensbasiert statt nachgerechnet: die Position ist genau dann faellig, wenn
+      // die Kette eine Liquidation zulaesst. Das umgeht die interne Margenformel und misst
+      // das, worauf es ankommt.
+      // Jede Ausnahme als "noch gesund" zu lesen waere falsch: eine Liquidation kann auch
+      // aus Gruenden scheitern, die nichts mit der Gesundheit der Position zu tun haben.
+      // Deshalb die Begruendung mitschreiben und die Marge mitfuehren.
+      if( intervals < 3 || 0 == intervals % 10 )
+         BOOST_TEST_MESSAGE( "  Intervall " << intervals
+                             << "  Marge " << p->margin.value
+                             << "  Groesse " << p->size.value
+                             << "  kum.Funding " << mid(db).cumulative_funding.value );
+      bool liquidatable = false;
+      try {
+         liquidate( p->get_id(), carol_id, carol_private_key );
+         liquidatable = true;
+      } catch( const fc::exception& e ) {
+         if( intervals < 3 || 0 == intervals % 10 )
+            BOOST_TEST_MESSAGE( "    Liquidation abgelehnt: "
+                                << e.to_string().substr( 0, 100 ) );
+      }
+      if( liquidatable ) break;
+   }
+   BOOST_TEST_MESSAGE( "  kumuliertes Funding: " << mid(db).cumulative_funding.value );
+   BOOST_TEST_MESSAGE( "  ==> nach " << intervals
+                       << " Intervallen unter der Erhaltungsmarge (Mark unveraendert)" );
+
+   // Funding allein MUSS eine Position irgendwann faellig machen. Vor der Korrektur an
+   // do_evaluate blieb equity() ueber alle 40 Intervalle bei 1000 stehen, waehrend die
+   // Schuld auf 4000 anwuchs: die Position war nie liquidierbar und haette unbegrenzt
+   // Schulden angehaeuft. Der Deckel nach oben haelt fest, dass der Satz nicht so hoch
+   // sein darf, dass eine gesunde Position binnen weniger Intervalle faellt.
+   BOOST_CHECK_MESSAGE( intervals < 40,
+                        "Funding allein machte die Position in 40 Intervallen NIE faellig "
+                        "-- die Zulaessigkeitspruefung ignoriert aufgelaufenes Funding" );
+   BOOST_CHECK_MESSAGE( intervals >= 5,
+                        "Funding allein liquidiert schon nach "
+                        + std::to_string( intervals ) + " Intervallen" );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
