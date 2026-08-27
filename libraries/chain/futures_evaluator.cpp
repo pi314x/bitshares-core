@@ -825,10 +825,16 @@ void_result futures_position_adjust_margin_evaluator::do_evaluate(
                                                     market.options.initial_margin_ratio );
       // Measured against the INITIAL requirement, not the maintenance one: withdrawing down to
       // the liquidation threshold would leave a position one tick from being taken away.
-      FC_ASSERT( _position->equity( mark ) + op.delta >= required,
+      //
+      // Und einschliesslich des aufgelaufenen Fundings: do_apply rechnet es unmittelbar
+      // danach ab, also wuerde eine Pruefung ohne es dem Eigentuemer erlauben, Marge
+      // abzuziehen, die er bereits schuldet.
+      const share_type equity =
+            _position->equity_after_funding( mark, market.cumulative_funding );
+      FC_ASSERT( equity + op.delta >= required,
                  "Withdrawing ${w} would leave equity ${e} against an initial margin "
                  "requirement of ${r}",
-                 ("w", -op.delta)("e", _position->equity( mark ) + op.delta)("r", required) );
+                 ("w", -op.delta)("e", equity + op.delta)("r", required) );
    }
 
    return void_result();
@@ -1045,10 +1051,16 @@ void_result futures_liquidate_evaluator::do_evaluate( const futures_liquidate_op
    const share_type maintenance = futures_margin_required(
          _position->abs_size(), mark, _market->options.maintenance_margin_ratio );
 
-   FC_ASSERT( _position->equity( mark ) < maintenance,
+   // Aufgelaufenes Funding MUSS hier einfliessen. do_apply settelt es gleich darauf ueber
+   // settle_to_mark; wuerde die Zulaessigkeitspruefung es weglassen, waere eine Position,
+   // die allein durch Funding unter Wasser steht, dauerhaft nicht liquidierbar. Sie koennte
+   // unbegrenzt Schulden anhaeufen, und der Verlust traefe erst beim naechsten Anfassen den
+   // Fonds oder die Gegenseite -- zu einem Zeitpunkt, an dem niemand mehr eingreifen kann.
+   const share_type equity = _position->equity_after_funding( mark, _market->cumulative_funding );
+   FC_ASSERT( equity < maintenance,
               "Position is not liquidatable: equity ${e} still meets the maintenance "
               "requirement of ${r} at mark ${m}",
-              ("e", _position->equity( mark ))("r", maintenance)("m", mark) );
+              ("e", equity)("r", maintenance)("m", mark) );
 
    FC_ASSERT( _position->owner != op.liquidator,
               "An account cannot liquidate its own position; add margin instead" );
