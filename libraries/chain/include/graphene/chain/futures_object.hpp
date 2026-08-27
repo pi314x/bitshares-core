@@ -201,6 +201,21 @@ class futures_position_object : public abstract_object<futures_position_object, 
       /// Margin plus unrealized PnL: what the position is actually worth.
       share_type equity( share_type mark )const
       { return margin + unrealized_pnl( mark ); }
+
+      /**
+       * Equity including funding that has accrued but not yet been settled onto this
+       * position.
+       *
+       * `margin` only moves when the position is touched, so between touches it overstates
+       * what the position is actually worth by exactly the unsettled funding. Any decision
+       * about solvency has to use this, not equity(): a position can be deeply underwater
+       * on funding alone while equity() still reads the margin it was opened with.
+       */
+      share_type equity_after_funding( share_type mark, share_type market_cumulative_funding )const
+      {
+         const share_type pending = size * ( market_cumulative_funding - last_cumulative_funding );
+         return equity( mark ) - pending;
+      }
 };
 
 /**
