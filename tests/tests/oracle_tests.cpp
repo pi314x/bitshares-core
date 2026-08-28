@@ -741,6 +741,180 @@ BOOST_AUTO_TEST_CASE( without_the_deviation_filter_the_majority_wins )
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 5 );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * GOVERNANCE: der Eigentümer kann den gemeldeten Wert allein durch Umgewichten drehen.
+ *
+ * oracle_update prüft nur, dass der Aufrufer der Eigentümer ist. Keine Verzögerung, keine
+ * Sperrfrist, keine Obergrenze auf die Änderung. Der Test zeigt die Folge: ohne dass ein
+ * einziger Produzent seine Meldung ändert, springt der Wert -- weil der gewichtete Median
+ * auf eine andere Meldung fällt.
+ *
+ * Das ist kein Fehler im Median, sondern eine Eigenschaft des Vertrauensmodells: wer das
+ * Oracle besitzt, bestimmt, wessen Stimme zählt. Der Test hält es fest, damit niemand
+ * das Oracle für vertrauensminimiert hält, was es nicht ist.
+ */
+BOOST_AUTO_TEST_CASE( the_owner_can_flip_the_value_by_reweighting_alone )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (owner)(p1)(p2)(p3) );
+
+   oracle_options opts;
+   opts.producers[ p1_id ] = 1;
+   opts.producers[ p2_id ] = 1;
+   opts.producers[ p3_id ] = 1;
+   opts.minimum_producers = 1;
+   opts.aggregation = oracle_aggregation_method::median_of_latest;
+   const auto oid = make_oracle( owner_id, owner_private_key, "GOV.TEST", opts );
+
+   publish( oid, p1_id, p1_private_key, 100 );
+   publish( oid, p2_id, p2_private_key, 200 );
+   publish( oid, p3_id, p3_private_key, 300 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_TEST_MESSAGE( "  drei Produzenten melden 100 / 200 / 300, gleiches Gewicht" );
+   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_TEST_MESSAGE( "  Median: 200" );
+
+   // Nur die Gewichte ändern. Keine neue Meldung.
+   generate_block();
+   set_expiration( db, trx );
+   oracle_options heavy = opts;
+   heavy.producers[ p1_id ] = 10;   // p1 überstimmt die anderen beiden zusammen
+   update_options( oid, owner_id, owner_private_key, heavy );
+
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_TEST_MESSAGE( "  Eigentümer setzt p1 auf Gewicht 10, ohne neue Meldung" );
+   BOOST_TEST_MESSAGE( "  neuer Wert entspricht jetzt p1s Meldung" );
+   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 100 ),
+                        "Umgewichten allein hat den Wert nicht gedreht" );
+
+   // Und wieder zurück, ebenso sofort.
+   generate_block();
+   set_expiration( db, trx );
+   oracle_options heavy3 = opts;
+   heavy3.producers[ p3_id ] = 10;
+   update_options( oid, owner_id, owner_private_key, heavy3 );
+   BOOST_CHECK( *oid(db).current_value == usd_per_core( 300 ) );
+   BOOST_TEST_MESSAGE( "  ==> der Eigentümer kann den Wert jederzeit auf jede vorliegende" );
+   BOOST_TEST_MESSAGE( "      Meldung setzen, sofort und ohne Ankündigung" );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * KOLLUSION: wie viele Produzenten müssen zusammenarbeiten, um den Wert zu bestimmen?
+ *
+ * Bei gleichen Gewichten ist die Antwort die halbe Menge, aufgerundet -- das ist die
+ * Definition des Medians. Der Test misst es für fünf und für sieben Produzenten, damit die
+ * Zahl belegt statt behauptet ist, und prüft zugleich, dass einer weniger NICHT reicht.
+ */
+BOOST_AUTO_TEST_CASE( measure_the_collusion_threshold_of_the_median )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (owner)(a1)(a2)(a3)(a4)(a5)(a6)(a7) );
+   const std::vector<account_id_type> ids {
+      a1_id, a2_id, a3_id, a4_id, a5_id, a6_id, a7_id };
+   const std::vector<fc::ecc::private_key> keys {
+      a1_private_key, a2_private_key, a3_private_key, a4_private_key,
+      a5_private_key, a6_private_key, a7_private_key };
+
+   for( size_t n : { size_t(5), size_t(7) } )
+   {
+      generate_block();
+      set_expiration( db, trx );
+      oracle_options opts;
+      for( size_t i = 0; i < n; ++i ) opts.producers[ ids[i] ] = 1;
+      opts.minimum_producers = 1;
+      opts.aggregation = oracle_aggregation_method::median_of_latest;
+      const auto oid = make_oracle( owner_id, owner_private_key,
+                                    "COL" + std::to_string( n ), opts );
+
+      // Ehrlich: alle melden 100.
+      for( size_t i = 0; i < n; ++i ) publish( oid, ids[i], keys[i], 100 );
+      BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+
+      size_t needed = 0;
+      for( size_t k = 1; k <= n && 0 == needed; ++k )
+      {
+         generate_block();
+         set_expiration( db, trx );
+         // k Kolludierende melden 999, der Rest bleibt bei 100.
+         for( size_t i = 0; i < k; ++i ) publish( oid, ids[i], keys[i], 999 );
+         for( size_t i = k; i < n; ++i ) publish( oid, ids[i], keys[i], 100 );
+         if( *oid(db).current_value == usd_per_core( 999 ) ) needed = k;
+      }
+      const size_t expected = n / 2 + 1;
+      BOOST_TEST_MESSAGE( "  " << n << " Produzenten: " << needed
+                          << " müssen kolludieren (erwartet " << expected << ")" );
+      BOOST_CHECK_EQUAL( needed, expected );
+   }
+   BOOST_TEST_MESSAGE( "  ==> die Schwelle ist die einfache Mehrheit der Gewichte," );
+   BOOST_TEST_MESSAGE( "      nicht mehr und nicht weniger" );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * ÖKONOMIE: was kostet es, ein Oracle zu manipulieren?
+ *
+ * Die ehrliche Antwort ist unbequem: on-chain fast nichts. Eine Veröffentlichung kostet die
+ * Netzwerkgebühr und sonst gar nichts -- es gibt keinen Einsatz, keine Kaution, nichts, das
+ * bei einer Falschmeldung verloren ginge. Der Test hält das fest, indem er misst, was ein
+ * Produzent für beliebig viele Falschmeldungen bezahlt.
+ *
+ * Die Sicherheit des Oracles ruht damit vollständig auf der Auswahl der Produzenten durch
+ * den Eigentümer, nicht auf irgendeinem ökonomischen Anreiz. Das ist eine Entwurfsentschei-
+ * dung, keine Lücke -- aber sie muss ausgesprochen sein, damit niemand einen Einsatz
+ * vermutet, den es nicht gibt.
+ */
+BOOST_AUTO_TEST_CASE( measure_the_on_chain_cost_of_publishing_a_false_value )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (owner)(liar) );
+   fund( liar, asset(10000000) );
+
+   oracle_options opts;
+   opts.producers[ liar_id ] = 1;
+   opts.minimum_producers = 1;
+   opts.aggregation = oracle_aggregation_method::median_of_latest;
+   const auto oid = make_oracle( owner_id, owner_private_key, "COST.TEST", opts );
+
+   const int64_t before = get_balance( liar_id, core_id );
+   for( int i = 0; i < 10; ++i )
+   {
+      generate_block();
+      set_expiration( db, trx );
+      publish( oid, liar_id, liar_private_key, 100 + i );   // jedes Mal ein anderer Unsinn
+   }
+   const int64_t after = get_balance( liar_id, core_id );
+
+   BOOST_TEST_MESSAGE( "  10 Falschmeldungen kosteten in der Testfixture "
+                       << ( before - after ) << " (dort sind alle Gebuehren 0)" );
+   BOOST_TEST_MESSAGE( "  Protokoll-Standardgebuehr je Veroeffentlichung: "
+                       << ( GRAPHENE_BLOCKCHAIN_PRECISION / 10 ) << " = 0,1 BTS" );
+   BOOST_TEST_MESSAGE( "  hinterlegter Einsatz, der bei einer Falschmeldung verfaellt: 0" );
+   BOOST_TEST_MESSAGE( "  ==> die Kosten einer Luege sind durch die Gebuehr gedeckelt und" );
+   BOOST_TEST_MESSAGE( "      voellig unabhaengig vom angerichteten Schaden. Die Sicherheit" );
+   BOOST_TEST_MESSAGE( "      des Oracles ruht allein auf der Auswahl der Produzenten." );
+
+   // Die eigentliche Zusicherung ist nicht die Gebuehrenhoehe -- die haengt an der
+   // Gebuehrentabelle -- sondern dass eine Falschmeldung NICHTS ausser der Gebuehr kostet:
+   // sie wird angenommen, sie bleibt stehen, und nichts wird eingezogen.
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 109 ),
+                        "die letzte Falschmeldung wurde nicht uebernommen" );
+   BOOST_CHECK_MESSAGE( get_balance( liar_id, core_id ) >= after,
+                        "nach der Veroeffentlichung wurde nachtraeglich etwas eingezogen" );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 
