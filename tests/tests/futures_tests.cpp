@@ -2330,4 +2330,141 @@ BOOST_AUTO_TEST_CASE( measure_how_long_funding_alone_takes_to_drain_a_position )
                         + std::to_string( intervals ) + " Intervallen" );
 } FC_LOG_AND_RETHROW() }
 
+
+/**
+ * OEKONOMIE: was kostet es, den Funding-Satz zu bewegen -- und was kauft impact_size?
+ *
+ * impact_size steht auf 10, weil ich diese Zahl gewaehlt habe, nicht weil sie aus etwas
+ * folgt. Der Test misst, was sie kostet.
+ *
+ * Ein erster Anlauf liess den Angreifer einfach hoch bieten und mass nichts: ein Gebot ueber
+ * dem besten Brief KREUZT und wird gefuellt, statt im Buch zu liegen. Das ist der Kern der
+ * Sache -- um den Impact-Preis zu heben, muss der Angreifer die ehrliche Tiefe erst
+ * AUFKAUFEN und dann eigene Tiefe stellen. Beides kostet, und genau das wird hier gezaehlt.
+ */
+BOOST_AUTO_TEST_CASE( measure_what_impact_size_costs_an_attacker )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(mallory) );
+   for( auto a : {alice_id, bob_id, carol_id, mallory_id} )
+      fund( a(db), asset(2000000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   const int64_t honest_depth = 20;   // ehrliche Kontrakte auf der Briefseite bei 101
+
+   BOOST_TEST_MESSAGE( "  Mark 100.  Ehrliches Buch: 20 Gebote bei 99, 20 Briefe bei 101." );
+   BOOST_TEST_MESSAGE( "  Der Angreifer will den Impact-Brief anheben. Dazu muss er die" );
+   BOOST_TEST_MESSAGE( "  ehrlichen Briefe aufkaufen und eigene Tiefe stellen." );
+
+   for( uint32_t impact : { 2u, 10u, 40u } )
+   {
+      generate_block();
+      set_expiration( db, trx );
+
+      futures_market_create_operation cop;
+      cop.owner            = alice_id;
+      cop.symbol           = "IMP" + std::to_string( impact ) + "-PERP";
+      cop.oracle_id        = oid;
+      cop.collateral_asset = core_id;
+      cop.contract_size    = 1;
+      cop.options.funding_interval_sec = 60;
+      cop.options.max_funding_rate_ppm = 10000;   // 1%
+      cop.options.max_mark_move_ppm    = 0;
+      cop.options.impact_size          = impact;
+      signed_transaction ctx;
+      ctx.operations.push_back( cop );
+      db.current_fee_schedule().set_fee( ctx.operations.back() );
+      set_expiration( db, ctx );
+      ctx.sign( alice_private_key, db.get_chain_id() );
+      const futures_market_id_type mid {
+         PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+      place( mid, bob_id,   bob_private_key,   true,  100, 50 );
+      place( mid, carol_id, carol_private_key, false, 100, 50 );
+      place( mid, carol_id, carol_private_key, true,   99, honest_depth );
+      place( mid, bob_id,   bob_private_key,   false, 101, honest_depth );
+
+      const int64_t before = get_balance( mallory_id, core_id );
+
+      // Schritt 1: die ehrlichen Briefe wegkaufen. Der Angreifer zahlt 101 fuer etwas,
+      // das der Mark mit 100 bewertet -- ein Verlust von 1 je Kontrakt, sofort.
+      generate_block();
+      set_expiration( db, trx );
+      place( mid, mallory_id, mallory_private_key, true, 101, honest_depth );
+
+      // Schritt 2: eigene Tiefe hoch stellen, mindestens impact_size Kontrakte, sonst
+      // mischt der Impact-Preis noch ehrliche Ware bei.
+      generate_block();
+      set_expiration( db, trx );
+      place( mid, mallory_id, mallory_private_key, false, 130,
+             static_cast<int64_t>( impact ) );
+
+      // Das Premium ist ZEITGEWICHTET ueber das Intervall. Ein Buch, das erst in der
+      // letzten Sekunde manipuliert wird, geht im Mittel unter -- der erste Anlauf mass
+      // deshalb Funding 0, obwohl der Impact-Mid bei 114 lag. Der Angreifer muss sein
+      // Buch also ueber das Intervall HALTEN, und genau das kostet ihn die Exponierung.
+      for( int k = 0; k < 3; ++k )
+      {
+         generate_blocks( db.head_block_time() + 40 );
+         set_expiration( db, trx );
+         publish( oid, bob_id, bob_private_key, 100 );
+         BOOST_TEST_MESSAGE( "     nach Schritt " << k
+                             << ": premium_avg=" << mid(db).premium_avg.value
+                             << " premium_last=" << mid(db).premium_last.value
+                             << " kum.Funding=" << mid(db).cumulative_funding.value );
+      }
+
+      // Diagnose: liegt der Brief des Angreifers ueberhaupt im Buch, und was sieht der
+      // Premium-Sampler? Ohne das waere "Funding 0" nicht von "Angriff wirkungslos"
+      // zu unterscheiden.
+      {
+         const auto& book = db.get_index_type<futures_order_index>().indices()
+                              .get<by_market_book>();
+         int64_t nbid = 0, nask = 0; share_type bestbid = 0, bestask = 0;
+         for( auto it = book.begin(); it != book.end(); ++it )
+         {
+            if( it->market_id != mid ) continue;
+            if( it->is_long ) { nbid += it->size.value; bestbid = it->price_per_contract; }
+            else { if( 0 == nask ) bestask = it->price_per_contract; nask += it->size.value; }
+         }
+         BOOST_TEST_MESSAGE( "     Buch: " << nbid << " Gebote (bestes " << bestbid.value
+                             << "), " << nask << " Briefe (bestes " << bestask.value << ")"
+                             << "  mark=" << ( mid(db).mark_price.valid()
+                                               ? mid(db).mark_price->value : -1 ) );
+      }
+      const int64_t spent = before - get_balance( mallory_id, core_id );
+      BOOST_TEST_MESSAGE( "  impact_size " << impact
+                          << ":  gebundenes Kapital " << spent
+                          << "  premium_last " << mid(db).premium_last.value
+                          << "  premium_avg " << mid(db).premium_avg.value
+                          << "  kum.Funding " << mid(db).cumulative_funding.value );
+
+      // Erkennung greift sofort: der Impact-Preis sieht das manipulierte Buch und der
+      // Momentanwert steht am Deckel.
+      BOOST_CHECK_MESSAGE( mid(db).premium_last.value > 0,
+                           "Impact-Preis hat die Manipulation nicht bemerkt" );
+      // Wirkung greift NICHT sofort: der zeitgewichtete Mittelwert hinkt nach, und genau
+      // das zwingt den Angreifer, sein Buch ueber das Intervall zu halten statt es fuer
+      // einen Augenblick zu stellen.
+      BOOST_CHECK_MESSAGE( mid(db).premium_avg.value <= mid(db).premium_last.value,
+                           "der Mittelwert eilte dem Momentanwert voraus" );
+      check_market_is_balanced( mid );
+   }
+
+   BOOST_TEST_MESSAGE( "" );
+   BOOST_TEST_MESSAGE( "  ==> Gemessen: der Angriff kostet drei Dinge gleichzeitig." );
+   BOOST_TEST_MESSAGE( "      1. die ehrliche Tiefe aufkaufen -- feste Kosten" );
+   BOOST_TEST_MESSAGE( "      2. impact_size eigene Kontrakte exponiert stellen --" );
+   BOOST_TEST_MESSAGE( "         waechst linear mit dem Parameter (246 / 350 / 740)" );
+   BOOST_TEST_MESSAGE( "      3. das alles ueber das Funding-Intervall HALTEN, weil das" );
+   BOOST_TEST_MESSAGE( "         Premium zeitgewichtet ist: premium_last steht sofort am" );
+   BOOST_TEST_MESSAGE( "         Deckel, premium_avg braucht das ganze Intervall dorthin." );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
