@@ -206,5 +206,26 @@ In order:
    determines whether the chain is actually post-quantum safe, rather than merely capable
    of being.
 
+## Building a node with PQ active, for a devnet
+
+`HARDFORK_PQ_0_TIME` is a placeholder date in 2030, so a stock build has PQ permanently
+inactive and cannot exercise any of this. A devnet build has to move that date before
+genesis, and `PQ_0.hf` guards the `#define` with `#ifndef` precisely so it can be
+overridden without editing the file:
+
+```
+cmake -DCMAKE_CXX_FLAGS='-DHARDFORK_PQ_0_TIME=fc::time_point_sec(1600000000)' ...
+```
+
+Setting it *before* the genesis timestamp matters, and is worth stating explicitly: the
+date takes part in every block's serialization format, so two binaries with different
+dates disagree about the id of the very first block. A chain produced by one cannot be
+opened by the other — it fails with `unlinkable_block_exception`, or asserts on
+`head_block_id() == next_block.previous` during replay, which reads like data corruption
+and is not. Record the date a devnet chain was built with, alongside its genesis file.
+
+The committee parameter `pq_serialization_active` is the second half of the gate and is
+set in the genesis (`initial_parameters.extensions`), not at build time.
+
 Steps 1–6 are engineering and governance mechanics. Step 7 is the one that decides the
 answer.

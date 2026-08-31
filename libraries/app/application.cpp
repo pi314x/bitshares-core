@@ -898,10 +898,7 @@ chain_id_type application_impl::get_chain_id() const
 bool application_impl::is_pq_active() const
 {
    if( !_chain_db ) return false;
-   const auto& gpo = _chain_db->get_global_properties();
-   return HARDFORK_PQ_0_PASSED( _chain_db->head_block_time() )
-          && gpo.parameters.extensions.value.pq_serialization_active.valid()
-          && *gpo.parameters.extensions.value.pq_serialization_active;
+   return _chain_db->is_pq_serialization_active();
 }
 
 /*

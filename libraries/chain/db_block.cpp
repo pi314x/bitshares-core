@@ -135,10 +135,7 @@ bool database::_push_block(const signed_block& new_block)
    uint32_t skip = get_node_properties().skip_flags;
 
    // PQ serialization format for block storage + validation
-   const auto& gpo = get_global_properties();
-   bool pq_active = HARDFORK_PQ_0_PASSED(head_block_time())
-                  && gpo.parameters.extensions.value.pq_serialization_active.valid()
-                  && *gpo.parameters.extensions.value.pq_serialization_active;
+   const bool pq_active = is_pq_serialization_active();
    fc::raw::scoped_pq_format pq_fmt( pq_active ? fc::raw::pq_format::current
                                               : fc::raw::pq_format::legacy );
 
@@ -436,10 +433,7 @@ signed_block database::_generate_block(
    FC_ASSERT( scheduled_witness == witness_id );
 
    // PQ serialization format for block production
-   const auto& gpo = get_global_properties();
-   bool pq_active = HARDFORK_PQ_0_PASSED(head_block_time())
-                  && gpo.parameters.extensions.value.pq_serialization_active.valid()
-                  && *gpo.parameters.extensions.value.pq_serialization_active;
+   const bool pq_active = is_pq_serialization_active();
    fc::raw::scoped_pq_format pq_fmt( pq_active ? fc::raw::pq_format::current
                                               : fc::raw::pq_format::legacy );
 
@@ -660,10 +654,7 @@ void database::_apply_block( const signed_block& next_block )
    _applied_ops.clear();
 
    // PQ serialization format: activate after hardfork time + committee parameter
-   const auto& gpo = get_global_properties();
-   bool pq_active = HARDFORK_PQ_0_PASSED(head_block_time())
-                  && gpo.parameters.extensions.value.pq_serialization_active.valid()
-                  && *gpo.parameters.extensions.value.pq_serialization_active;
+   const bool pq_active = is_pq_serialization_active();
    fc::raw::scoped_pq_format pq_fmt( pq_active ? fc::raw::pq_format::current
                                               : fc::raw::pq_format::legacy );
 
@@ -780,10 +771,7 @@ processed_transaction database::_apply_transaction(const signed_transaction& trx
    // not at all silently mismatches the digest the signer used, causing valid PQ-signed
    // transactions submitted through, e.g., network_broadcast_api::broadcast_transaction to be
    // rejected once the PQ_0 hardfork is active.
-   const auto& gpo = get_global_properties();
-   const bool pq_active = HARDFORK_PQ_0_PASSED(head_block_time())
-                  && gpo.parameters.extensions.value.pq_serialization_active.valid()
-                  && *gpo.parameters.extensions.value.pq_serialization_active;
+   const bool pq_active = is_pq_serialization_active();
    fc::raw::scoped_pq_format pq_fmt( pq_active ? fc::raw::pq_format::current
                                                 : fc::raw::pq_format::legacy );
 
@@ -1014,10 +1002,7 @@ fc::future<void> database::precompute_parallel( const signed_block& block, const
    // See _apply_block's identical computation; this must match what block validation/
    // application will later use, since the results computed here (transaction ids, recovered
    // signature keys, the block id) get cached and are not recomputed downstream.
-   const auto& gpo = get_global_properties();
-   const bool pq_active = HARDFORK_PQ_0_PASSED(head_block_time())
-                  && gpo.parameters.extensions.value.pq_serialization_active.valid()
-                  && *gpo.parameters.extensions.value.pq_serialization_active;
+   const bool pq_active = is_pq_serialization_active();
    const fc::raw::pq_format fmt = pq_active ? fc::raw::pq_format::current : fc::raw::pq_format::legacy;
 
    std::vector<fc::future<void>> workers;
@@ -1062,10 +1047,7 @@ fc::future<void> database::precompute_parallel( const signed_block& block, const
 
 fc::future<void> database::precompute_parallel( const precomputable_transaction& trx )const
 {
-   const auto& gpo = get_global_properties();
-   const bool pq_active = HARDFORK_PQ_0_PASSED(head_block_time())
-                  && gpo.parameters.extensions.value.pq_serialization_active.valid()
-                  && *gpo.parameters.extensions.value.pq_serialization_active;
+   const bool pq_active = is_pq_serialization_active();
    const fc::raw::pq_format fmt = pq_active ? fc::raw::pq_format::current : fc::raw::pq_format::legacy;
    return fc::do_parallel([this,&trx,fmt] () {
       _precompute_parallel( &trx, 1, skip_nothing, fmt );
