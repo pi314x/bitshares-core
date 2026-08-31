@@ -856,9 +856,16 @@ namespace graphene { namespace wallet { namespace detail {
       FC_ASSERT( !new_active.pq_key_auths.empty() && !new_owner.pq_key_auths.empty(),
                  "refusing to write an authority with no post-quantum key: the account would "
                  "become unusable" );
-      FC_ASSERT( new_active.address_auths.empty() && new_owner.address_auths.empty(),
-                 "this account has address authorities, which are classical; migrate them "
-                 "before moving to a post-quantum-only authority" );
+      // Gegen die BESTEHENDE Autoritaet pruefen, nicht gegen die eben gebaute. pq_only()
+      // legt ein frisches authority-Objekt an und uebertraegt address_auths gar nicht,
+      // also war new_*.address_auths immer leer und diese Zusicherung konnte nie ausloesen.
+      // Die Migration haette einem Konto mit Adress-Autoritaeten diese stillschweigend
+      // entfernt -- genau das, was hier verhindert werden sollte.
+      FC_ASSERT( account.active.address_auths.empty() && account.owner.address_auths.empty(),
+                 "this account has address authorities, which are classical and which this "
+                 "migration cannot carry over; they would be dropped silently. There is no "
+                 "wallet command to replace them with post-quantum addresses yet, so such an "
+                 "account has no migration path -- see PQ-MIGRATION.md" );
 
       account_update_operation op;
       op.account = account.id;
