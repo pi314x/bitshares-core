@@ -2467,4 +2467,194 @@ BOOST_AUTO_TEST_CASE( measure_what_impact_size_costs_an_attacker )
    BOOST_TEST_MESSAGE( "         Deckel, premium_avg braucht das ganze Intervall dorthin." );
 } FC_LOG_AND_RETHROW() }
 
+/**
+ * MMEV, Schritt 1: den Nachweis fuehren, bevor gehaertet wird.
+ *
+ * Ein Witness, der zwei aufeinanderfolgende Bloecke produziert, hat ein Fenster, in dem
+ * niemand gegen ihn handeln kann: er stellt sein Buch im ersten Block, niemand darf
+ * dazwischen, und im zweiten raeumt er es wieder ab. Innerhalb dieses Fensters ist er
+ * risikolos -- kein Gegenhandel, keine Liquidation, kein Arbitrageur.
+ *
+ * Die Frage ist nicht ob er das Buch verzerren kann (offensichtlich ja), sondern wieviel
+ * Funding er damit bewegt. Das Premium ist zeitgewichtet, und jede Spanne zaehlt mit dem
+ * Premium an ihrem ANFANG. Ein Fenster von zwei Bloecken traegt also hoechstens seine
+ * eigene Dauer zum Intervallmittel bei.
+ *
+ * Gemessen wird gegen eine ehrliche Vergleichslinie im selben Aufbau: einmal mit
+ * unveraendertem Buch, einmal mit einem Angreifer, der genau zwei Bloecke lang verzerrt.
+ */
+BOOST_AUTO_TEST_CASE( measure_what_two_consecutive_blocks_are_worth )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(mallory) );
+   for( auto a : {alice_id, bob_id, carol_id, mallory_id} )
+      fund( a(db), asset(4000000000) );
+
+   // Realistische Groessenordnung. Bei einem Mark von 100 klemmt der Premium-Deckel
+   // (1% = 1 Einheit) so hart, dass die Zeitgewichtung anschliessend auf 0 rundet -- die
+   // Null waere dann ein Artefakt der kleinen Zahlen und nicht der Mechanik. Bei 1e6
+   // betraegt der Deckel 10000 Einheiten und der Anteil des Fensters bleibt sichtbar.
+   const int64_t MARK = 1000000;
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, MARK );
+
+   // Realistische Intervalle: eine Stunde, wie es Perpetuals ueblicherweise fahren, und
+   // eine Minute als Gegenprobe -- je kuerzer das Intervall, desto mehr Gewicht traegt
+   // ein Fenster fester Laenge.
+   std::map<uint32_t, int64_t> moved_by_interval, cost_by_interval;
+
+   for( uint32_t interval : { 60u, 3600u } )
+   {
+      int64_t funding_honest = 0, funding_attacked = 0, attacker_cost = 0;
+      int64_t in_window_premium = 0;
+
+      for( int attacked = 0; attacked < 2; ++attacked )
+      {
+         generate_block();
+         set_expiration( db, trx );
+
+         futures_market_create_operation cop;
+         cop.owner            = alice_id;
+         cop.symbol           = std::string( "MMEV" ) + ( attacked ? "A" : "H" )
+                              + std::to_string( interval ) + "-PERP";
+         cop.oracle_id        = oid;
+         cop.collateral_asset = core_id;
+         cop.contract_size    = 1;
+         cop.options.funding_interval_sec = interval;
+         cop.options.max_funding_rate_ppm = 10000;   // 1%
+         cop.options.max_mark_move_ppm    = 0;
+         cop.options.impact_size          = 10;
+         signed_transaction ctx;
+         ctx.operations.push_back( cop );
+         db.current_fee_schedule().set_fee( ctx.operations.back() );
+         set_expiration( db, ctx );
+         ctx.sign( alice_private_key, db.get_chain_id() );
+         const futures_market_id_type mid {
+            PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+         // Ein ehrliches, symmetrisches Buch: kein Premium, also auch kein Funding.
+         place( mid, bob_id,   bob_private_key,   true,  MARK, 50 );
+         place( mid, carol_id, carol_private_key, false, MARK, 50 );
+         place( mid, carol_id, carol_private_key, true,  MARK - MARK/100, 20 );
+         place( mid, bob_id,   bob_private_key,   false, MARK + MARK/100, 20 );
+
+         const int64_t balance_before = get_balance( mallory_id, core_id );
+
+         if( attacked )
+         {
+            // Block 1 des Fensters: ehrliche Briefe wegkaufen und eigene Tiefe hoch
+            // stellen. Beides in EINEM Block, weil der Angreifer den Block baut.
+            generate_block();
+            set_expiration( db, trx );
+            place( mid, mallory_id, mallory_private_key, true,  MARK + MARK/100, 20 );
+            place( mid, mallory_id, mallory_private_key, false, MARK + MARK*3/10, 10 );
+
+            // Der Oracle publiziert unabhaengig vom Angreifer weiter; genau diese
+            // Publikation tastet das Premium ab. Ohne sie waere das Fenster wirkungslos
+            // und der Test wuerde nur beweisen, dass niemand hingesehen hat.
+            generate_block();
+            set_expiration( db, trx );
+            publish( oid, bob_id, bob_private_key, MARK );
+            in_window_premium = mid(db).premium_last.value;
+            BOOST_TEST_MESSAGE( "     im Fenster: premium_last="
+                                << mid(db).premium_last.value
+                                << " premium_avg=" << mid(db).premium_avg.value );
+            {
+               const auto& book = db.get_index_type<futures_order_index>().indices()
+                                    .get<by_market_book>();
+               int64_t nask = 0; share_type bestask = 0;
+               for( auto it = book.begin(); it != book.end(); ++it )
+                  if( it->market_id == mid && !it->is_long )
+                  { if( 0 == nask ) bestask = it->price_per_contract; nask += it->size.value; }
+               BOOST_TEST_MESSAGE( "     im Fenster: " << nask << " Briefe, bestes "
+                                   << bestask.value );
+            }
+
+            // Block 2 des Fensters: wieder abraeumen. Zwischen diesen beiden Bloecken
+            // konnte niemand handeln -- das ist der ganze Vorteil.
+            generate_block();
+            set_expiration( db, trx );
+            std::vector<futures_order_id_type> mine;
+            {
+               const auto& book = db.get_index_type<futures_order_index>().indices()
+                                    .get<by_market_book>();
+               for( auto it = book.begin(); it != book.end(); ++it )
+                  if( it->market_id == mid && it->owner == mallory_id )
+                     mine.push_back( futures_order_id_type( it->id ) );
+            }
+            for( auto o : mine )
+               cancel( o, mallory_id, mallory_private_key );
+         }
+
+         // Das Intervall zu Ende laufen lassen und schliessen. Der Oracle publiziert
+         // weiter, denn jede Publikation setzt den Mark neu und tastet das Premium ab.
+         const auto interval_end = db.head_block_time() + int( interval ) + 10;
+         while( db.head_block_time() < interval_end )
+         {
+            generate_blocks( db.head_block_time() + 20 );
+            set_expiration( db, trx );
+            publish( oid, bob_id, bob_private_key, MARK );
+         }
+
+         BOOST_TEST_MESSAGE( "     am Intervallende: premium_last="
+                             << mid(db).premium_last.value
+                             << " premium_avg=" << mid(db).premium_avg.value );
+         const int64_t cum = mid(db).cumulative_funding.value;
+         if( attacked )
+         {
+            funding_attacked = cum;
+            attacker_cost = balance_before - get_balance( mallory_id, core_id );
+         }
+         else
+            funding_honest = cum;
+      }
+
+      const int64_t moved = funding_attacked - funding_honest;
+      BOOST_TEST_MESSAGE( "  Funding-Intervall " << interval << "s:" );
+      BOOST_TEST_MESSAGE( "     Funding ehrlich          " << funding_honest );
+      BOOST_TEST_MESSAGE( "     Funding nach 2 Bloecken  " << funding_attacked );
+      BOOST_TEST_MESSAGE( "     bewegt                   " << moved );
+      BOOST_TEST_MESSAGE( "     Kapital des Angreifers   " << attacker_cost );
+
+      moved_by_interval[interval] = moved;
+      cost_by_interval[interval] = attacker_cost;
+
+      // Die Erkennung muss sofort greifen: der Impact-Preis sieht das verzerrte Buch und
+      // die Momentanaufnahme steht am Deckel. Ohne diese Zusicherung waere ein Funding von
+      // 0 nicht von "niemand hat hingesehen" zu unterscheiden.
+      BOOST_CHECK_MESSAGE( in_window_premium >= int64_t( 10000 ),
+                           "der Impact-Preis hat die Verzerrung im Fenster nicht bemerkt: "
+                           << in_window_premium );
+   }
+
+   // Der eigentliche Befund, als Verhaeltnis statt als Absolutwert: das Fenster hat feste
+   // Laenge, also faellt sein Anteil am zeitgewichteten Mittel umgekehrt zum Intervall.
+   // Von 60s auf 3600s sind das 60x weniger; geprueft wird die Haelfte davon, damit
+   // Rundung nicht als Verletzung durchgeht.
+   BOOST_CHECK_MESSAGE( moved_by_interval[3600] * 30 <= moved_by_interval[60],
+                        "das Fenster verlor beim laengeren Intervall nicht an Gewicht: "
+                        << moved_by_interval[60] << " bei 60s gegen "
+                        << moved_by_interval[3600] << " bei 3600s" );
+
+   BOOST_TEST_MESSAGE( "" );
+   BOOST_TEST_MESSAGE( "  Befund: zwei aufeinanderfolgende Bloecke reichen, um den" );
+   BOOST_TEST_MESSAGE( "  Impact-Preis an den Deckel zu treiben -- die Erkennung greift" );
+   BOOST_TEST_MESSAGE( "  sofort -- aber nicht, um das zeitgewichtete Mittel zu bewegen." );
+   BOOST_TEST_MESSAGE( "  Zwei Mechanismen zusammen: der Deckel macht aus einer 30-Prozent-" );
+   BOOST_TEST_MESSAGE( "  Verzerrung eine Stichprobe von 1 Prozent, und die Gewichtung" );
+   BOOST_TEST_MESSAGE( "  macht daraus den Bruchteil Fensterdauer/Intervall." );
+   BOOST_TEST_MESSAGE( "  Gemessen: " << moved_by_interval[60] << " bei 60s Intervall, "
+                       << moved_by_interval[3600] << " bei 3600s -- bei "
+                       << cost_by_interval[60] << " gebundenem Kapital." );
+   BOOST_TEST_MESSAGE( "  Nicht gemessen: was der Angreifer daran VERDIENT. Funding wird" );
+   BOOST_TEST_MESSAGE( "  zwischen den Seiten umgelegt, er muesste also die passende Seite" );
+   BOOST_TEST_MESSAGE( "  halten -- und er kauft hier die ehrlichen Briefe ueber dem Mark," );
+   BOOST_TEST_MESSAGE( "  zahlt also erst einmal drauf." );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
