@@ -9,6 +9,21 @@ post-quantum safe, and none of the remaining distance can be closed by writing m
 Every gap below is a deployment decision — a hardfork date, a committee vote, an operator
 flag, or a user running a command.
 
+## Where the code lives
+
+The work spans **two repositories**, which matters for anyone reviewing or building it:
+
+| | |
+|---|---|
+| `bitshares-core` | consensus gating, evaluators, wallet, operations, tests |
+| `libraries/fc` (submodule) | the primitives — `fc/crypto/pqc.*`, `vendor/pqclean/`, and `fc::raw::pq_format` itself |
+
+`fc::raw::pq_format` is the mechanism every hardfork gate is built on, and it lives in the
+submodule. The submodule is therefore pinned to a branch on the fork rather than upstream,
+because the pinned commit is not reachable from `bitshares/bitshares-fc`. Both the URL and the
+pin need reverting to upstream once the fc side is merged, and **the fc side has to merge
+first** — core does not compile without it.
+
 ## The asymmetry that should drive priorities
 
 Not all of these surfaces fail the same way, and the difference is more important than the
@@ -147,15 +162,24 @@ run so CI stays hermetic):
 - Post-quantum fields are rejected before activation and accepted after, end to end through
   the chain database.
 - A PQ-signed transaction verifies and applies with no classical key in the authority.
+- **The vendored primitives match FIPS 203/204.** 354 known-answer checks against NIST's own
+  ACVP vectors (`libraries/fc/tests/crypto/pqc_kat/`): ML-KEM-768 keyGen, encapsulation and
+  decapsulation, and ML-DSA-65 keyGen and signature generation, all reproducing NIST's
+  expected outputs byte for byte. sigGen runs in both modes -- deterministic (`rnd` = 32 zero
+  bytes) and hedged (`rnd` from the vector) -- through PQClean's
+  `crypto_sign_signature_ctx_derand`. Reproducing a signature exactly is a stronger statement
+  than verifying one: a signer with the wrong nonce derivation, domain separation or context
+  encoding still produces signatures its own verifier accepts.
+  ML-DSA-65 signature verification is checked on 15 cases, 12 of them tampered — modified
+  message, modified `z`, modified commitment, modified hint — so a verifier that accepted
+  forgeries would fail rather than pass a suite of valid signatures only. The decapsulation
+  group covers FIPS 203 §7.3 implicit rejection, where a malformed ciphertext must yield a
+  pseudorandom secret rather than an error.
 
 **Not verified:**
 
-- **No FIPS 203/204 conformance vectors.** PQClean is vendored without NIST KAT/ACVP test
-  vectors, so nothing in this tree proves the ML-DSA and ML-KEM implementations produce the
-  standard's answers — only that they are self-consistent (what this code encrypts, this
-  code decrypts). A self-consistent implementation of the wrong algorithm would pass every
-  test here. This should be closed before any mainnet activation; it is mechanical work, not
-  research.
+- Only the parameter sets in use (ML-KEM-768, ML-DSA-65) have conformance coverage. The
+  vendored tree also builds ML-KEM-512/1024 and ML-DSA-44/87, which nothing consumes.
 - No third-party cryptographic audit of the integration.
 - No side-channel analysis of the vendored primitives.
 - Performance under sustained load with PQ signatures on a real network. An ML-DSA-65
@@ -166,18 +190,50 @@ run so CI stays hermetic):
 
 In order:
 
-1. Add NIST KAT vectors for the vendored ML-DSA and ML-KEM parameter sets. Nothing else on
-   this list is safe to do first.
+1. ~~Add NIST KAT vectors for the vendored ML-DSA and ML-KEM parameter sets.~~ Done for
+   ML-KEM-768 and ML-DSA-65, key generation, signature generation and verification alike:
+   354 checks, all passing. The other parameter sets the vendored tree builds are unused
+   and uncovered.
 2. Independent review of the cryptographic integration.
-3. Measure PQ signature load on a realistic network — `maximum_transaction_size` must leave
-   room for key-bearing operations (see the sizing note in `hardfork.d/PQ_0.hf`; the
-   historical 2048 default is too small).
+3. ~~Measure PQ signature load.~~ Done on one core, `-O2`, by
+   `libraries/fc/tests/crypto/pqc_load_test.cpp`; see "What post-quantum costs" below. Still
+   open: the same measurement on a real network under sustained load, which a devnet cannot
+   stand in for.
 4. Set a real `HARDFORK_PQ_0_TIME`.
 5. Committee enables `pq_serialization_active`.
 6. Witnesses configure PQ signing keys.
 7. Design and agree a migration policy for the opt-in gap above — this is the one that
    determines whether the chain is actually post-quantum safe, rather than merely capable
    of being.
+
+## What post-quantum costs
+
+Measured on one core with an optimized build (`pqc_load_test`; secp256k1 arrives already
+optimized, so a Debug build handicaps only ML-DSA and overstates the gap by more than
+double).
+
+| | secp256k1 | ML-DSA-65 | ratio |
+|---|---|---|---|
+| verification | 79 us (a key *recovery*) | 224 us | 2.6x |
+| signing | 53 us | 814 us | 15x |
+| key generation | — | 233 us | — |
+| bytes on the wire | 65 | 5261 (3309 sig + 1952 key) | 81x |
+| transfers in a 2 MB block | 14,463 | 392 | 37x fewer |
+
+**The constraint is bandwidth, not CPU.** A full post-quantum block validates in 0.08s of a
+single core — under 3% of the 3-second slot, and Graphene verifies in parallel on top of
+that. What collapses is throughput: the same block carries 37x fewer transfers, because
+ML-DSA offers no public-key recovery and so every signature drags its 1952-byte key along.
+
+Two consequences worth stating plainly:
+
+- `maximum_block_size`, not `maximum_transaction_size`, is what decides post-quantum
+  capacity. The transaction-size limit only has to clear key-bearing *operations* (see the
+  sizing note in `hardfork.d/PQ_0.hf`); the block-size limit is what caps how many PQ-signed
+  transactions a chain can carry per second.
+- Signing at 814 us is a wallet-side cost and irrelevant to consensus, but it is 15x
+  classical and will be noticeable on constrained hardware — a phone, a hardware wallet —
+  where it lands on the user rather than on a validator.
 
 ## Building a node with PQ active, for a devnet
 
