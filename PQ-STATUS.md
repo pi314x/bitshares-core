@@ -105,8 +105,10 @@ the code.
 `authority` gained `pq_key_auths` but `address_auths` was left classical. An account holding
 an address authority remains quantum-spendable through that path even after migrating its
 keys. `migrate_wallet_pq_only()` refuses to operate on such accounts rather than reporting a
-false success, which is the right behaviour, but it means those accounts have no migration
-path at all on this branch.
+false success, which is the right behaviour. The mechanism to fix it now exists --
+`address( const pq_public_key_type& )` means an address entry can be derived from a
+post-quantum key -- but no wallet command replaces a classical address entry with one, so
+the refusal still points at a step nobody can take. See PQ-MIGRATION.md.
 
 ## The memo construction, specifically
 
@@ -194,17 +196,32 @@ In order:
    ML-KEM-768 and ML-DSA-65, key generation, signature generation and verification alike:
    354 checks, all passing. The other parameter sets the vendored tree builds are unused
    and uncovered.
-2. Independent review of the cryptographic integration.
+2. Independent review of the cryptographic integration. Not something this repository can
+   do for itself; what it can do is remove the excuses, and the conformance coverage in
+   item 1 is now complete for the parameter sets in use.
 3. ~~Measure PQ signature load.~~ Done on one core, `-O2`, by
    `libraries/fc/tests/crypto/pqc_load_test.cpp`; see "What post-quantum costs" below. Still
    open: the same measurement on a real network under sustained load, which a devnet cannot
    stand in for.
-4. Set a real `HARDFORK_PQ_0_TIME`.
-5. Committee enables `pq_serialization_active`.
-6. Witnesses configure PQ signing keys.
+4. Set a real `HARDFORK_PQ_0_TIME`. A committee decision, not a code change — but note that
+   the date participates in every block's serialization format, so it has to be agreed
+   before it is compiled into anything that produces blocks. Two binaries with different
+   dates disagree about the id of block 1 and cannot open each other's chains.
+5. Committee enables `pq_serialization_active`. The chain-side plumbing is there and
+   `database::is_pq_serialization_active()` reads it; the approval cycle itself is
+   governance. One obstacle on the way was removed: bitsharesjs could not serialize any
+   operation carrying a fee schedule, which is every committee parameter change. A second
+   remains — `proposal_create` built from that library comes out with a mangled
+   `review_period_seconds` and `expiration_time`. Committee proposals are normally built
+   with `cli_wallet`, which is unaffected.
+6. ~~Witnesses configure PQ signing keys.~~ Verified end to end on a devnet: a witness with
+   `pq-private-key` configured and `witness_object.pq_signing_key` set produces blocks
+   carrying `witness_pq_signature`, signed by exactly that key, and the chain builds on
+   them. Witnesses without one produce none. The per-block cost is about 5.3 KB.
 7. Design and agree a migration policy for the opt-in gap above — this is the one that
    determines whether the chain is actually post-quantum safe, rather than merely capable
-   of being.
+   of being. A design is proposed in [PQ-MIGRATION.md](PQ-MIGRATION.md); agreeing it is
+   the community's, and none of it is implemented.
 
 ## What post-quantum costs
 
