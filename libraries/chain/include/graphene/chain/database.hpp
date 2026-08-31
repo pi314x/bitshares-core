@@ -188,6 +188,17 @@ namespace graphene { namespace chain {
          const witness_schedule_object&         get_witness_schedule_object()const;
 
          time_point_sec   head_block_time()const;
+
+         /**
+          * Whether transactions and blocks are serialized in the post-quantum format.
+          *
+          * Both halves of the activation must hold: the PQ_0 hardfork has passed AND the
+          * committee has set pq_serialization_active. The two answers differ by a few bytes
+          * per authority, which is enough to change a size-priced fee, a transaction hex and
+          * every signature digest -- so anything that packs a transaction outside of block
+          * application has to ask this and set fc::raw::scoped_pq_format accordingly.
+          */
+         bool             is_pq_serialization_active()const;
          uint32_t         head_block_num()const;
          block_id_type    head_block_id()const;
          witness_id_type  head_block_witness()const;
