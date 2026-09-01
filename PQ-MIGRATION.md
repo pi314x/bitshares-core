@@ -97,14 +97,15 @@ population is small, professional, reachable, and already expected to run curren
 
 None of this exists. In rough order of how much argument each will cause:
 
-- **A wallet command for `address_auths`.** This one is not policy, it is a defect.
-  `migrate_wallet_pq_only()` refuses on any account holding an address authority and tells
-  the user to "migrate them before moving to a post-quantum-only authority" — and no command
-  in the reference wallet does that. An address is a hash of a key, so an address entry
-  derived from a classical key can only ever be satisfied classically; migrating means
-  *replacing* the entry with one derived from a PQ key (`address( const pq_public_key_type& )`
-  exists for exactly this) or dropping it. Until the wallet offers that, those accounts have
-  no migration path and the refusal message points at nothing.
+- ~~**A wallet command for `address_auths`.**~~ Done: `migrate_address_auths_pq()`. An
+  address is a hash of a key, so an entry derived from a classical key can only ever be
+  satisfied classically; the command replaces each with the address of a freshly generated
+  ML-DSA key at the same weight, leaving the threshold arithmetic untouched.
+
+  It stays a separate command, and `migrate_wallet_pq_only()` still refuses rather than
+  calling it. The wallet does not know whose key an address entry hashed — if it belonged to
+  a co-signer, replacing it removes their ability to sign and they are not told. That is the
+  account holder's decision, so it is asked for rather than assumed.
 
 - **A committee parameter for the deadline**, alongside `pq_serialization_active`, so the
   date is governance rather than a compile-time constant. It has to be settable long before

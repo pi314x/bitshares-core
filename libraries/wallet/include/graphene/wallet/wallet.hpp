@@ -726,6 +726,27 @@ class wallet_api
       signed_transaction migrate_wallet_pq_only( const string& account_name_or_id,
                                                  bool broadcast )const;
 
+      /** Replaces every address authority with one derived from a freshly generated
+       *  post-quantum key.
+       *
+       *  An address is the hash of a key, so an address entry made from a classical key can
+       *  only ever be satisfied classically. It cannot be converted -- only replaced. This
+       *  generates one ML-DSA key per entry, stores it in the wallet, and writes the address
+       *  of that key in place of the old one at the same weight.
+       *
+       *  \warning This REMOVES whoever held the original address key from the authority.
+       *  If an address entry belonged to a co-signer rather than to you, they lose the
+       *  ability to sign and will not be told. That is why migrate_wallet_pq_only() refuses
+       *  such accounts instead of doing this quietly: run this only when you know every
+       *  address entry is your own.
+       *
+       * @param account_name_or_id the account to migrate
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction migrate_address_auths_pq( const string& account_name_or_id,
+                                                   bool broadcast )const;
+
       /** Generates a post-quantum (ML-KEM-768) memo key for an account and publishes the
        *  public half in the account's options.
        *
@@ -2093,6 +2114,7 @@ FC_API( graphene::wallet::wallet_api,
         (import_pq_key)
         (migrate_wallet)
         (migrate_wallet_pq_only)
+        (migrate_address_auths_pq)
         (generate_pq_memo_key)
         (propose_parameter_change)
         (propose_fee_change)

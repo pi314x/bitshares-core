@@ -983,4 +983,54 @@ namespace graphene { namespace wallet { namespace detail {
       return sign_transaction(tx, broadcast);
    }
 
-}}} // namespace graphene::wallet::detail
+
+   signed_transaction wallet_api_impl::migrate_address_auths_pq( const string& account_name_or_id,
+                                                                 bool broadcast )
+   { try {
+      account_object account = get_account( account_name_or_id );
+
+      FC_ASSERT( !account.active.address_auths.empty() || !account.owner.address_auths.empty(),
+                 "this account has no address authorities, so there is nothing to migrate" );
+
+      // Eine Adresse ist der Hash eines Schluessels. Welcher Schluessel das war, steht nirgends,
+      // also laesst sich der Eintrag nicht umrechnen -- nur ersetzen. Jeder Eintrag bekommt
+      // einen frischen ML-DSA-Schluessel mit demselben Gewicht, damit die Schwellenrechnung
+      // unveraendert bleibt.
+      auto replace = [this]( const authority& current ) -> authority
+      {
+         authority result = current;
+         result.address_auths.clear();
+         for( const auto& a : current.address_auths )
+         {
+            fc::pq_private_key pq_priv = fc::pq_private_key::generate( fc::pq_algorithm::ml_dsa_65 );
+            pq_public_key_type pq_pub( pq_priv.get_public_key() );
+            result.address_auths[ address( pq_pub ) ] = a.second;
+            _pq_keys[ pq_pub ] = pq_priv.to_base58();
+         }
+         return result;
+      };
+
+      authority new_active = replace( account.active );
+      authority new_owner  = replace( account.owner );
+
+      FC_ASSERT( new_active.address_auths.size() == account.active.address_auths.size()
+                 && new_owner.address_auths.size() == account.owner.address_auths.size(),
+                 "internal error: an address authority was lost during migration" );
+
+      account_update_operation op;
+      op.account = account.id;
+      op.fee = account_update_operation::fee_params_t().fee;
+      op.owner  = new_owner;
+      op.active = new_active;
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      // Mit dem Schluessel signiert, der das Konto in diesem Augenblick noch kontrolliert.
+      return sign_transaction2( tx, vector<public_key_type>(), broadcast );
+   } FC_CAPTURE_AND_RETHROW( (account_name_or_id)(broadcast) ) }
+}
+
+}} // namespace graphene::wallet::detail
