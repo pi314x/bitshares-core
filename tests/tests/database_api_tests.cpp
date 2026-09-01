@@ -1488,13 +1488,24 @@ BOOST_AUTO_TEST_CASE( get_transaction_hex )
    BOOST_CHECK( db_api.get_transaction_hex( trx ) == hex_str );
    BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) + expected_sig_hex() == hex_str );
 
-   // Same identity must hold under the post-hardfork format, which is what the branch's
-   // version of this test assumed unconditionally.
+   // Die API folgt dem Format der KETTE, nicht dem dieses Fadens.
+   //
+   // Das ambiente fc::raw::pq_format ist ein thread_local; ein RPC-Aufrufer hat keine
+   // Moeglichkeit, es zu setzen, und ein Knoten, dessen API in einem anderen Format
+   // antwortet als seine Kette rechnet, nennt zu niedrige Gebuehren und bildet
+   // Transaktions-IDs, die im Block nie auftauchen. database_api setzt es deshalb selbst
+   // aus is_pq_serialization_active().
+   //
+   // Diese Kette hat pq_serialization_active nicht gesetzt. Wird das Format hier absichtlich
+   // verstellt, darf sich die Antwort also NICHT aendern -- frueher tat sie es, und genau
+   // darauf beruhte der Fehler.
    {
+      const std::string chain_hex       = db_api.get_transaction_hex( trx );
+      const std::string chain_hex_nosig = db_api.get_transaction_hex_without_sig( trx );
+
       fc::raw::scoped_pq_format fmt( fc::raw::pq_format::current );
-      std::string pq_hex_str = fc::to_hex( fc::raw::pack( trx ) );
-      BOOST_CHECK( db_api.get_transaction_hex( trx ) == pq_hex_str );
-      BOOST_CHECK( db_api.get_transaction_hex_without_sig( trx ) + expected_sig_hex() == pq_hex_str );
+      BOOST_CHECK_EQUAL( db_api.get_transaction_hex( trx ), chain_hex );
+      BOOST_CHECK_EQUAL( db_api.get_transaction_hex_without_sig( trx ), chain_hex_nosig );
    }
 
 } FC_LOG_AND_RETHROW() }
