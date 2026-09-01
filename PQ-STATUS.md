@@ -105,10 +105,16 @@ the code.
 `authority` gained `pq_key_auths` but `address_auths` was left classical. An account holding
 an address authority remains quantum-spendable through that path even after migrating its
 keys. `migrate_wallet_pq_only()` refuses to operate on such accounts rather than reporting a
-false success, which is the right behaviour. The mechanism to fix it now exists --
-`address( const pq_public_key_type& )` means an address entry can be derived from a
-post-quantum key -- but no wallet command replaces a classical address entry with one, so
-the refusal still points at a step nobody can take. See PQ-MIGRATION.md.
+false success, which is the right behaviour, and `migrate_address_auths_pq()` is now the
+step it points at: `address( const pq_public_key_type& )` lets an address entry be derived
+from a post-quantum key, and that command replaces each classical entry with one at the
+same weight.
+
+It is a separate command rather than part of the pq-only migration for a reason that cannot
+be resolved in code. An address is the hash of a key, and the wallet does not know whose key
+it was. It cannot convert such an entry, only replace it -- and if the entry belonged to a
+co-signer, replacing it removes their ability to sign, silently. That is a decision only the
+account holder can make, so it is asked for explicitly.
 
 ## The memo construction, specifically
 
