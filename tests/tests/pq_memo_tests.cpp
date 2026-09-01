@@ -246,6 +246,81 @@ BOOST_AUTO_TEST_CASE( a_malformed_memo_key_is_rejected )
    BOOST_CHECK_NO_THROW( o.validate() );
 }
 
+/**
+ * A vector for the other implementations.
+ *
+ * The wallets have to derive the same AES key from the same material, and "I read the formula
+ * and wrote it out again" is not evidence of that -- it is the same assumption made twice. So
+ * this emits a memo built by the chain's own code, with the keys that produced it, and the
+ * JavaScript side is required to recover the plaintext from those bytes alone.
+ *
+ * The ECC keys are derived from fixed strings so the other side can regenerate them instead of
+ * having to import a secret. The KEM secret key is printed because that is also the check of
+ * whether the two libraries agree on the ML-KEM key format at all -- a user moving a memo key
+ * from the CLI wallet into the browser finds out here, not on a memo they cannot open.
+ */
+BOOST_AUTO_TEST_CASE( hybrid_memo_cross_implementation_vector )
+{
+   auto sender    = key_of( "sender" );
+   auto recipient = key_of( "recipient" );
+   auto kem       = fc::pq_kem_generate( fc::pq_algorithm::ml_kem_768 );
+
+   const std::string plaintext = "cross-implementation vector";
+   const uint64_t    nonce     = 1234567890ULL;
+
+   memo_data m;
+   m.from = sender.get_public_key();
+   m.to   = recipient.get_public_key();
+   m.set_message_pq( sender, recipient.get_public_key(), kem.pk, plaintext, nonce );
+
+   BOOST_REQUIRE( m.pq_ciphertext.valid() );
+   BOOST_CHECK_EQUAL( m.get_message_pq( recipient, sender.get_public_key(), kem.sk ), plaintext );
+
+   BOOST_TEST_MESSAGE( "VECTOR nonce="      << m.nonce );
+   BOOST_TEST_MESSAGE( "VECTOR plaintext="  << plaintext );
+   BOOST_TEST_MESSAGE( "VECTOR kem_sk="     << fc::to_hex( kem.sk.data(), kem.sk.size() ) );
+   BOOST_TEST_MESSAGE( "VECTOR kem_pk="     << fc::to_hex( kem.pk.data(), kem.pk.size() ) );
+   BOOST_TEST_MESSAGE( "VECTOR message="    << fc::to_hex( m.message.data(), m.message.size() ) );
+   BOOST_TEST_MESSAGE( "VECTOR ciphertext=" << fc::to_hex( m.pq_ciphertext->data(),
+                                                           m.pq_ciphertext->size() ) );
+}
+
+/**
+ * The sender cannot read back their own hybrid memo. This is a real change in behaviour and
+ * it is pinned here so nobody assumes otherwise.
+ *
+ * With a classical memo, ECDH is symmetric: the sender re-derives the same shared secret from
+ * their own private key and the recipient's public one, which is why a wallet can show you
+ * what you wrote in a transfer you sent years ago. ML-KEM is not symmetric. Encapsulation
+ * produces the shared secret as output, the sender holds nothing that reproduces it, and only
+ * the recipient's secret key recovers it from the ciphertext.
+ *
+ * So a wallet that writes hybrid memos must keep its own copy locally if it wants to show
+ * sent memos back to the user. There is no way to recover them from the chain.
+ */
+BOOST_AUTO_TEST_CASE( sender_cannot_reread_own_hybrid_memo )
+{
+   auto sender    = key_of( "sender" );
+   auto recipient = key_of( "recipient" );
+   auto kem       = fc::pq_kem_generate( fc::pq_algorithm::ml_kem_768 );
+
+   memo_data m;
+   m.set_message_pq( sender, recipient.get_public_key(), kem.pk, "what did I write?" );
+
+   // The recipient can.
+   BOOST_CHECK_EQUAL( m.get_message_pq( recipient, sender.get_public_key(), kem.sk ),
+                      "what did I write?" );
+
+   // The sender cannot: they have the classical half but never held the KEM secret key, and
+   // the encapsulated secret was not kept.
+   BOOST_CHECK_THROW( m.get_message_pq( sender, recipient.get_public_key(), kem.pk ),
+                      fc::exception );
+
+   // And the same memo read the classical way fails too -- the KEM half is genuinely load
+   // bearing, not decoration alongside a key that would have worked on its own.
+   BOOST_CHECK_THROW( m.get_message( recipient, sender.get_public_key() ), fc::exception );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE( pq_memo_chain_tests, database_fixture )
