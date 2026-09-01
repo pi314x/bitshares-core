@@ -665,6 +665,15 @@ signed_transaction wallet_api::migrate_wallet_pq_only( const string& account_nam
    return tx;
 }
 
+signed_transaction wallet_api::migrate_address_auths_pq( const string& account_name_or_id,
+                                                         bool broadcast )const
+{
+   FC_ASSERT(!is_locked());
+   auto tx = my->migrate_address_auths_pq( account_name_or_id, broadcast );
+   save_wallet_file();
+   return tx;
+}
+
 signed_transaction wallet_api::generate_pq_memo_key( const string& account_name_or_id,
                                                      bool broadcast )const
 {
