@@ -2483,6 +2483,188 @@ BOOST_AUTO_TEST_CASE( measure_what_impact_size_costs_an_attacker )
  * Gemessen wird gegen eine ehrliche Vergleichslinie im selben Aufbau: einmal mit
  * unveraendertem Buch, einmal mit einem Angreifer, der genau zwei Bloecke lang verzerrt.
  */
+/**
+ * MMEV gegen den Oracle: was ein Witness durch Zensur erreicht.
+ *
+ * Ein Witness kann Oracle-Publikationen aus seinen Bloecken heraushalten. Er kann den Wert
+ * nicht faelschen -- dazu braeuchte er die Mehrheit der Produzenten --, aber er kann ihn
+ * ALT werden lassen. Die Frage ist, was die Kette dann tut: auf dem alten Preis
+ * weiterrechnen, oder aufhoeren.
+ *
+ * Gemessen wird an derselben Position zum selben Preis; nur die Frische unterscheidet sich.
+ * Faellt die Liquidation bei altem Wert aus und geht bei frischem durch, dann faellt das
+ * System geschlossen aus -- Zensur kann eine Liquidation VERHINDERN, aber keine falsche
+ * ausloesen. Das ist die richtige Richtung: der Zensor schadet sich selbst, wenn er eine
+ * Liquidation aufhaelt, die ihn betrifft, statt fremde Positionen zu Unrecht zu reissen.
+ */
+/**
+ * MMEV gegen die Abrechnung: wer bestimmt den Preis, zu dem ALLE abrechnen?
+ *
+ * Frueher der erste Aufrufer nach Ablauf, und zwar auf den Mark in dessen Block. Ein
+ * Blockbauer waehlt seine eigenen Bloecke, hatte damit also eine kostenlose Option auf den
+ * fuer ihn guenstigsten der veroeffentlichten Werte -- und der Preis gilt fuer jeden im
+ * Kontrakt, ein einziges Mal fixiert und nie wieder angefasst. Anders als beim Funding gibt
+ * es hier weder Deckel noch Zeitgewichtung, die das daempfen.
+ *
+ * Jetzt fixiert ihn die erste Oracle-Publikation ab Ablauf. Geprueft wird beides: dass ohne
+ * Publikation gar nicht abgerechnet werden kann, und dass der Preis danach derjenige der
+ * Publikation ist und nicht derjenige, den ein spaeterer Aufrufer haette waehlen koennen.
+ */
+BOOST_AUTO_TEST_CASE( the_oracle_fixes_the_settlement_price_not_the_first_caller )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   // Datierter Kontrakt, der bald ablaeuft.
+   const auto expiry = db.head_block_time() + 300;
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, expiry,
+                                 "SET-PERP", undamped() );
+
+   place( mid, bob_id,   bob_private_key,   true,  100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+
+   // Ueber den Ablauf hinaus, ohne dass der Oracle etwas sagt.
+   generate_blocks( expiry + 30 );
+   set_expiration( db, trx );
+   BOOST_REQUIRE( db.head_block_time() > *mid(db).expiry );
+   BOOST_CHECK_MESSAGE( !mid(db).is_settled,
+                        "der Markt galt als abgerechnet, ohne dass der Oracle publiziert hat" );
+
+   // Ohne Publikation darf niemand abrechnen -- auch nicht, wer den Block baut.
+   GRAPHENE_REQUIRE_THROW( settle_market( mid, dan_id, dan_private_key ), fc::exception );
+   BOOST_TEST_MESSAGE( "  nach Ablauf, ohne Publikation: Abrechnung abgelehnt" );
+
+   // Die erste Publikation ab Ablauf fixiert den Preis, ohne dass jemand etwas aufruft.
+   publish( oid, bob_id, bob_private_key, 88 );
+   BOOST_REQUIRE( mid(db).is_settled );
+   BOOST_REQUIRE( mid(db).settlement_price.valid() );
+   BOOST_CHECK_EQUAL( mid(db).settlement_price->value, 88 );
+   BOOST_TEST_MESSAGE( "  erste Publikation ab Ablauf fixiert den Preis auf 88" );
+
+   // Ein spaeterer, guenstigerer Wert aendert daran nichts mehr -- genau die Wahl, die dem
+   // ersten Aufrufer frueher offenstand.
+   publish( oid, bob_id, bob_private_key, 120 );
+   BOOST_CHECK_EQUAL( mid(db).settlement_price->value, 88 );
+   BOOST_TEST_MESSAGE( "  spaeterer Wert 120 aendert den Abrechnungspreis nicht" );
+
+   settle_market( mid, dan_id, dan_private_key );
+   BOOST_TEST_MESSAGE( "  Abrechnung laeuft zum fixierten Preis" );
+
+   BOOST_TEST_MESSAGE( "" );
+   BOOST_TEST_MESSAGE( "  Befund: der Zeitpunkt gehoert dem Oracle, nicht dem Aufrufer." );
+   BOOST_TEST_MESSAGE( "  Was bleibt: ein Produzent kann die erste Publikation nach Ablauf" );
+   BOOST_TEST_MESSAGE( "  um die von ihm gebauten Bloecke verzoegern -- Sekunden, nicht" );
+   BOOST_TEST_MESSAGE( "  beliebig lange." );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( a_censored_oracle_stops_liquidation_rather_than_faking_it )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   // Kurze Lebensdauer, damit der Wert im Test altern kann.
+   const uint32_t lifetime = 300;
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id, "CEN.CORE", lifetime );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "CEN-PERP", undamped() );
+
+   place( mid, bob_id,   bob_private_key,   true,  100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto pid = position_of( mid, bob_id )->get_id();
+
+   // Unter Wasser: Eigenkapital 20 gegen eine Erhaltungsanforderung von 46.
+   publish( oid, bob_id, bob_private_key, 92 );
+   BOOST_REQUIRE( mid(db).mark_price.valid() );
+   BOOST_CHECK_EQUAL( pid(db).equity( 92 ).value, 20 );
+
+   // Jetzt schweigt der Oracle laenger als seine Lebensdauer -- genau das, was ein Witness
+   // durch Zensur erreicht.
+   generate_blocks( db.head_block_time() + int( lifetime ) + 30 );
+   set_expiration( db, trx );
+
+   BOOST_TEST_MESSAGE( "  Oracle veraltet: mark_price im Objekt noch gesetzt? "
+                       << ( mid(db).mark_price.valid() ? "ja" : "nein" ) );
+
+   // Der zwischengespeicherte Mark steht noch im Objekt -- er verfaellt nicht von selbst.
+   // Trotzdem darf die Liquidation nicht laufen, denn gelesen wird ueber den Lebendtest.
+   GRAPHENE_REQUIRE_THROW( liquidate( pid, dan_id, dan_private_key ), fc::exception );
+   BOOST_TEST_MESSAGE( "  bei altem Wert: Liquidation abgelehnt" );
+
+   // Frischer Wert, gleicher Preis, gleiche Position: jetzt muss sie durchgehen. Ohne diese
+   // Haelfte waere "abgelehnt" nicht von "war nie liquidierbar" zu unterscheiden.
+   publish( oid, bob_id, bob_private_key, 92 );
+   liquidate( pid, dan_id, dan_private_key );
+   BOOST_TEST_MESSAGE( "  bei frischem Wert, selber Preis: Liquidation geht durch" );
+
+   BOOST_TEST_MESSAGE( "" );
+   BOOST_TEST_MESSAGE( "  Befund: Zensur des Oracles kann eine Liquidation aufhalten, aber" );
+   BOOST_TEST_MESSAGE( "  keine falsche ausloesen. Das System faellt geschlossen aus." );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * MMEV gegen eine ruhende Order: kann der Blockbauer sie schlechter fuellen als ihr Limit?
+ *
+ * Er bestimmt, welche Order auf welche trifft. Wenn die Zuteilung eine ruhende Order zu
+ * einem schlechteren Preis als ihrem eigenen fuellen koennte, waere jede Limit-Order im
+ * Buch Freiwild. Geprueft wird beides: dass eine Gegenorder jenseits des Limits NICHT
+ * matcht, und dass genau am Limit gefuellt wird.
+ */
+BOOST_AUTO_TEST_CASE( a_resting_order_never_fills_worse_than_its_limit )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1 );
+
+   // Bob bietet 100. Mehr als 100 je Kontrakt will er nicht zahlen.
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   BOOST_REQUIRE( !position_of( mid, bob_id ) );
+
+   // Carol will zu 110 verkaufen -- schlechter fuer Bob als sein Limit. Das darf nicht
+   // matchen, egal in welcher Reihenfolge der Blockbauer die beiden legt.
+   place( mid, carol_id, carol_private_key, false, 110, 10 );
+   BOOST_CHECK_MESSAGE( !position_of( mid, bob_id ),
+                        "eine Gegenorder jenseits des Limits hat die ruhende Order gefuellt" );
+   BOOST_CHECK_MESSAGE( !position_of( mid, carol_id ),
+                        "eine Gegenorder jenseits des Limits hat sich selbst gefuellt" );
+   BOOST_TEST_MESSAGE( "  Gegenorder zu 110 gegen Gebot 100: kein Fill" );
+
+   // Genau am Limit muss es fuellen, sonst misst der Test nur eine kaputte Zuteilung.
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   BOOST_REQUIRE( position_of( mid, bob_id ) );
+   // entry_value ist die laufende Summe Groesse x Preis; bei 10 Kontrakten zu 100 also
+   // genau 1000. Faellt der Fill schlechter aus, steht hier mehr.
+   BOOST_CHECK_EQUAL( position_of( mid, bob_id )->size.value, 10 );
+   BOOST_CHECK_EQUAL( position_of( mid, bob_id )->entry_value.value, 1000 );
+   BOOST_TEST_MESSAGE( "  Gegenorder zu 100: gefuellt, entry_value exakt 1000" );
+
+   BOOST_TEST_MESSAGE( "" );
+   BOOST_TEST_MESSAGE( "  Befund: das Limit ist die Untergrenze, nicht die Reihenfolge." );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( measure_what_two_consecutive_blocks_are_worth )
 { try {
    generate_blocks( HARDFORK_FUTURES_TIME );
