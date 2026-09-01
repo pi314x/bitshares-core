@@ -127,6 +127,27 @@ void update_futures_mark_price( database& d, const futures_market_object& market
    if( new_mark.valid() )
       accumulate_premium( d, market, *new_mark );
    accrue_futures_funding( d, market );
+
+   // Expiry fixes the settlement price HERE, on the first oracle publish at or after it,
+   // rather than in futures_settle_evaluator on the first caller.
+   //
+   // Letting the caller fix it handed whoever got there first a free option: the price
+   // everyone settles against was the mark in whatever block that caller chose, and a block
+   // producer chooses its own blocks. They cannot move the oracle -- that needs a majority of
+   // producers -- but they could pick among the values it published, and settle when one
+   // suited the position they held. Everyone else in the contract paid for that choice.
+   //
+   // Driving it from the oracle instead removes the choice. What is left is that a producer
+   // could delay the first post-expiry publish by the blocks it controls, which moves the
+   // snapshot by seconds rather than by however long it cared to wait.
+   if( new_mark.valid() && !market.is_settled && market.expiry.valid() && now >= *market.expiry )
+   {
+      const share_type final_price = *new_mark;
+      d.modify( market, [&final_price]( futures_market_object& m ) {
+         m.settlement_price = final_price;
+         m.is_settled       = true;
+      } );
+   }
 }
 
 /**
@@ -1274,17 +1295,15 @@ void_result futures_settle_evaluator::do_apply( const futures_settle_operation& 
 { try {
    database& d = db();
 
-   // The first caller after expiry fixes the price everyone settles against. Snapshotting once
-   // matters: settling each position against a moving oracle would hand different traders
-   // different prices for the same contract.
-   if( !_market->is_settled )
-   {
-      const share_type final_price = *_market->mark_price;
-      d.modify( *_market, [&final_price]( futures_market_object& m ) {
-         m.settlement_price = final_price;
-         m.is_settled       = true;
-      } );
-   }
+   // Der Preis steht bereits: update_futures_mark_price fixiert ihn bei der ersten
+   // Oracle-Publikation ab Ablauf. Hier ihn erneut zu setzen wuerde genau die Wahl
+   // zurueckgeben, die dort entzogen wurde.
+   //
+   // Ein Markt kann abgelaufen sein, ohne dass seither publiziert wurde -- dann ist er noch
+   // nicht abgerechnet, und do_evaluate haelt das ueber live_mark_price bereits auf.
+   FC_ASSERT( _market->is_settled,
+              "Cannot settle yet: the settlement price is fixed by the first oracle "
+              "publication at or after expiry, and none has arrived" );
 
    if( nullptr == _position )
       return void_result();
