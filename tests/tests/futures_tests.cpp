@@ -11,6 +11,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/futures_object.hpp>
+#include <graphene/chain/futures_evaluator.hpp>   // futures_margin_required
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/protocol/futures.hpp>
 
@@ -2663,6 +2664,110 @@ BOOST_AUTO_TEST_CASE( a_resting_order_never_fills_worse_than_its_limit )
 
    BOOST_TEST_MESSAGE( "" );
    BOOST_TEST_MESSAGE( "  Befund: das Limit ist die Untergrenze, nicht die Reihenfolge." );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * Was bringt es, das Wettrennen um eine Liquidation zu gewinnen?
+ *
+ * Diese Flaeche laesst sich nicht wegkonstruieren. Der Liquidator verdient die Strafgebuehr
+ * auf den uebernommenen Teil -- das ist der Anreiz, der ueberhaupt dafuer sorgt, dass jemand
+ * unterdeckte Positionen aufraeumt, bevor sie die Versicherung kosten. Und wer den Block
+ * baut, gewinnt jedes Wettrennen um diesen Anreiz, weil er die Reihenfolge bestimmt.
+ *
+ * Die Frage ist also nicht, ob ein Witness hier verdient. Er verdient. Die Frage ist, wieviel
+ * und wodurch es begrenzt ist -- und das gehoert gemessen, nicht behauptet.
+ *
+ * Zwei Begrenzungen stehen zur Debatte:
+ *   1. liquidation_penalty_ratio, ein Marktparameter: die Obergrenze pro uebernommener
+ *      Notionale. Der Marktbetreiber setzt damit die Decke.
+ *   2. Die Teilliquidation: genommen wird nur, was noetig ist, um die Position wieder auf
+ *      volle Initial-Margin zu bringen. Der Rest bleibt beim Eigentuemer und ist der
+ *      Bemessungsgrundlage entzogen.
+ */
+BOOST_AUTO_TEST_CASE( measure_what_winning_a_liquidation_race_is_worth )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(mallory) );
+   for( auto a : { alice_id, bob_id, carol_id, mallory_id } )
+      fund( a(db), asset(4000000000) );
+
+   const int64_t MARK = 100;
+   const int64_t SIZE = 100;
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, MARK );
+   const auto mid = make_market( alice_id, alice_private_key, oid, 1, {}, "BTC-PERP", undamped() );
+
+   // bob long SIZE, carol short SIZE, beide auf Initial-Margin
+   place( mid, bob_id,   bob_private_key,   true,  MARK, SIZE );
+   place( mid, carol_id, carol_private_key, false, MARK, SIZE );
+   const auto pid = position_of( mid, bob_id )->get_id();
+
+   const auto& opts = mid(db).options;
+   const share_type voll_notional = share_type( SIZE ) * MARK;
+
+   // Der Mark faellt, bis bob unter die Erhaltungsschwelle rutscht.
+   publish( oid, bob_id, bob_private_key, 94 );
+   BOOST_REQUIRE( mid(db).mark_price.valid() );
+   const share_type mark_jetzt = *mid(db).mark_price;
+
+   const share_type groesse_vorher = pid(db).abs_size();
+   const share_type equity_vorher  = pid(db).equity( mark_jetzt );
+
+   // mallory gewinnt das Rennen -- in einem Block, den sie selbst baut, immer.
+   const auto vorher = db.get_balance( mallory_id, core_id ).amount;
+   liquidate( pid, mallory_id, mallory_private_key );
+   const auto nachher = db.get_balance( mallory_id, core_id ).amount;
+
+   const auto* pos = position_of( mid, mallory_id );
+   BOOST_REQUIRE( nullptr != pos );
+
+   const share_type genommen  = pos->abs_size();
+   const share_type bezahlt   = vorher - nachher;
+   const share_type erhalten  = pos->margin;
+
+   // Was mallory herausholt, ist genau die Differenz: sie bekommt Margin, fuer die sie nicht
+   // bezahlt hat. Das IST die Strafgebuehr.
+   const share_type gewinn = erhalten - bezahlt;
+   const share_type strafe = futures_margin_required( genommen, mark_jetzt,
+                                                      opts.liquidation_penalty_ratio );
+   BOOST_CHECK_EQUAL( gewinn.value, strafe.value );
+
+   // Und der Instrumententest: die Messung darf nicht deshalb klein sein, weil nichts
+   // passiert ist.
+   BOOST_REQUIRE_GT( genommen.value, 0 );
+   BOOST_REQUIRE_GT( gewinn.value, 0 );
+
+   // --- Begrenzung 1: der Marktparameter ------------------------------------------------
+   // Der Gewinn liegt auf der uebernommenen Notionale, gedeckelt durch das Verhaeltnis.
+   const share_type genommene_notional = genommen * mark_jetzt;
+   BOOST_CHECK_LE( gewinn.value,
+                   ( genommene_notional.value * opts.liquidation_penalty_ratio + 9999 ) / 10000 );
+
+   // --- Begrenzung 2: was die Teilliquidation abzieht ------------------------------------
+   // Haette die Uebernahme die ganze Position erfasst, laege die Strafe auf der vollen
+   // Notionale. Die Differenz ist, was die Teilliquidation dem Fenster nimmt.
+   const share_type strafe_bei_ganz = futures_margin_required(
+         groesse_vorher, mark_jetzt, opts.liquidation_penalty_ratio );
+   BOOST_CHECK_LT( gewinn.value, strafe_bei_ganz.value );
+
+   BOOST_TEST_MESSAGE( "MMEV-Liquidation:"
+      << "  Position " << groesse_vorher.value << " Kontrakte, Equity " << equity_vorher.value
+      << ", Mark " << mark_jetzt.value );
+   BOOST_TEST_MESSAGE( "  uebernommen " << genommen.value << " von " << groesse_vorher.value
+      << " (" << ( 100 * genommen.value / groesse_vorher.value ) << " %)" );
+   BOOST_TEST_MESSAGE( "  Gewinn des Gewinners " << gewinn.value
+      << " auf " << voll_notional.value << " Notionale gesamt"
+      << " = " << ( 10000 * gewinn.value / voll_notional.value ) << " ppm" );
+   BOOST_TEST_MESSAGE( "  bei voller Uebernahme waeren es " << strafe_bei_ganz.value
+      << " gewesen -- die Teilliquidation nimmt " << ( strafe_bei_ganz - gewinn ).value
+      << " davon weg" );
+
+   check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( measure_what_two_consecutive_blocks_are_worth )
