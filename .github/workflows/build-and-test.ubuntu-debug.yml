@@ -55,8 +55,13 @@ jobs:
         sudo apt-get auto-remove -y
         sudo apt-get clean -y
         df -h
-        sudo du -hs /mnt/*
-        sudo ls -alr /mnt/
+        # Reine Platzdiagnose, aber unter `bash -e` toedlich: ist /mnt leer, expandiert der
+        # Platzhalter nicht, du bekommt die Zeichenkette "/mnt/*" und scheitert -- und der
+        # Schritt bricht ab, bevor irgendetwas gebaut wird. Genau daran ist dieser Auftrag
+        # gescheitert, waehrend Ubuntu Release durchlief: dessen Fassung hat diese beiden
+        # Zeilen nicht.
+        sudo du -hs /mnt/* 2>/dev/null || true
+        sudo ls -alr /mnt/ || true
     - uses: actions/checkout@v3
       with:
         submodules: recursive
