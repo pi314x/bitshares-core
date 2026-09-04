@@ -51,7 +51,10 @@ jobs:
                      libboost-context-dev \
                      libboost-regex-dev \
                      libboost-coroutine-dev \
-                     libcurl4-openssl-dev
+                     libcurl4-openssl-dev \
+                     libzstd-dev \
+                     libbz2-dev \
+                     liblzma-dev
         sudo apt-get auto-remove -y
         sudo apt-get clean -y
         df -h
@@ -109,7 +112,7 @@ jobs:
         set -o pipefail
         if ! make -j 2 -C _build 2>&1 | tee "$GITHUB_WORKSPACE/build.log"; then
           echo "::group::Fehlermeldungen aus dem Bau"
-          grep -E "error:|Error [0-9]" "$GITHUB_WORKSPACE/build.log" \
+          grep -E "error:|Error [0-9]|cannot find -l|undefined reference" "$GITHUB_WORKSPACE/build.log" \
             | head -30 | while IFS= read -r zeile; do echo "::error::$zeile"; done
           echo "::endgroup::"
           exit 1
