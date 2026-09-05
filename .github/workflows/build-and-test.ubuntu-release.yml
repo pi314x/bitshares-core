@@ -93,10 +93,19 @@ jobs:
         # Adminrechte kann sagen, woran es lag.
         set -o pipefail
         if ! make -j 2 -C _build 2>&1 | tee "$GITHUB_WORKSPACE/build.log"; then
-          echo "::group::Fehlermeldungen aus dem Bau"
-          grep -E "error:|Error [0-9]|cannot find -l|undefined reference" "$GITHUB_WORKSPACE/build.log" \
-            | head -30 | while IFS= read -r zeile; do echo "::error::$zeile"; done
+          echo "::group::Letzte Zeilen des Baus"
+          # Das ENDE des Protokolls, nicht eine Auswahl daraus. Ein Filter zeigt nichts,
+          # wenn der Prozess abgeschossen wurde -- dann steht dort weder "error:" noch
+          # sonst ein Muster, und die Annotation meldet bloss den Abbruch ohne Grund.
+          tail -25 "$GITHUB_WORKSPACE/build.log" \
+            | while IFS= read -r zeile; do echo "::error::$zeile"; done
           echo "::endgroup::"
+          # Speicher und Platz mitgeben: ein abgeschossener Linker sieht sonst aus wie ein
+          # stiller Fehlschlag.
+          echo "::error::--- freier Speicher ---"
+          free -m | while IFS= read -r zeile; do echo "::error::$zeile"; done
+          echo "::error::--- Plattenplatz ---"
+          df -h / /mnt 2>/dev/null | while IFS= read -r zeile; do echo "::error::$zeile"; done
           exit 1
         fi
         df -h
