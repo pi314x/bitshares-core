@@ -112,20 +112,35 @@ jobs:
     - name: Unit-Tests
       timeout-minutes: 15
       run: |
-        # Zwischen den Binaries aufraeumen, wie es der Debug-Workflow tut. Die Tests legen
-        # ihre Datenverzeichnisse unter /tmp/graphene* an; bleiben sie stehen, findet das
-        # naechste Programm einen Zustand vor, den es nicht erwartet. Das war der einzige
-        # Unterschied zwischen dem bestehenden Debug- und dem scheiternden Release-Lauf.
-        _build/tests/app_test -l test_suite
-        rm -rf /tmp/graphene*
-        _build/tests/es_test -l test_suite
-        rm -rf /tmp/graphene*
+        # Jeden Testlauf einzeln pruefen, statt sich auf errexit zu verlassen: `set -e` gilt
+        # fuer kein Kommando einer Pipeline ausser dem letzten, und die Ausgabe laeuft durch
+        # tee. Eine Fassung mit `{ ... } | tee` meldete im Versuch gruen, obwohl mittendrin
+        # ein Befehl scheiterte -- der gefaehrlichste Fehler, den ein Testschritt haben kann.
+        #
+        # Bei einem Fehlschlag wandert das Ende der Ausgabe in Annotationen. Ohne das steht
+        # dort nur "exit code 201" -- Boost.Tests Code fuer fehlgeschlagene Zusicherungen --
+        # und wer keine Adminrechte am Repository hat, kommt an die Protokolle nicht heran.
+        set -o pipefail
+        PROTOKOLL="$GITHUB_WORKSPACE/tests.log"
+        : > "$PROTOKOLL"
+        lauf() {
+          if ! "$@" 2>&1 | tee -a "$PROTOKOLL"; then
+            echo "::group::Letzte Zeilen vor dem Abbruch"
+            tail -30 "$PROTOKOLL" | while IFS= read -r zeile; do echo "::error::$zeile"; done
+            echo "::endgroup::"
+            echo "::error::gescheitert: $*"
+            exit 1
+          fi
+          # Zwischen den Binaries aufraeumen: die Testprogramme legen ihre Datenverzeichnisse
+          # unter /tmp/graphene* an, und das naechste soll keinen fremden Zustand vorfinden.
+          rm -rf /tmp/graphene*
+        }
+        lauf _build/tests/app_test -l test_suite
+        lauf _build/tests/es_test -l test_suite
         export GRAPHENE_TESTING_ES_URL=http://127.0.0.1:9201/
-        _build/tests/es_test -l test_suite
-        rm -rf /tmp/graphene*
-        libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l test_suite
-        rm -rf /tmp/graphene*
-        _build/tests/cli_test -l test_suite
+        lauf _build/tests/es_test -l test_suite
+        lauf libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l test_suite
+        lauf _build/tests/cli_test -l test_suite
         df -h
     - name: Quick test for program arguments
       run: |
