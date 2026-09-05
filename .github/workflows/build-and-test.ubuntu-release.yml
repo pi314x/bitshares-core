@@ -112,11 +112,19 @@ jobs:
     - name: Unit-Tests
       timeout-minutes: 15
       run: |
+        # Zwischen den Binaries aufraeumen, wie es der Debug-Workflow tut. Die Tests legen
+        # ihre Datenverzeichnisse unter /tmp/graphene* an; bleiben sie stehen, findet das
+        # naechste Programm einen Zustand vor, den es nicht erwartet. Das war der einzige
+        # Unterschied zwischen dem bestehenden Debug- und dem scheiternden Release-Lauf.
         _build/tests/app_test -l test_suite
+        rm -rf /tmp/graphene*
         _build/tests/es_test -l test_suite
+        rm -rf /tmp/graphene*
         export GRAPHENE_TESTING_ES_URL=http://127.0.0.1:9201/
         _build/tests/es_test -l test_suite
+        rm -rf /tmp/graphene*
         libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l test_suite
+        rm -rf /tmp/graphene*
         _build/tests/cli_test -l test_suite
         df -h
     - name: Quick test for program arguments
