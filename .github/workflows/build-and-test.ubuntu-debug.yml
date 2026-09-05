@@ -135,31 +135,40 @@ jobs:
         # tee. Eine Fassung mit `{ ... } | tee` meldete im Versuch gruen, obwohl mittendrin
         # ein Befehl scheiterte -- der gefaehrlichste Fehler, den ein Testschritt haben kann.
         #
-        # Bei einem Fehlschlag wandert das Ende der Ausgabe in Annotationen. Ohne das steht
-        # dort nur "exit code 201" -- Boost.Tests Code fuer fehlgeschlagene Zusicherungen --
-        # und wer keine Adminrechte am Repository hat, kommt an die Protokolle nicht heran.
+        # GitHub zeigt nur die ersten Annotationen eines Schrittes, deshalb steht das
+        # Wichtigste zuerst: welches Programm gescheitert ist, dann Boost.Tests eigene
+        # Fehlerzeilen, dann erst das Ende der Ausgabe.
         set -o pipefail
         PROTOKOLL="$GITHUB_WORKSPACE/tests.log"
         : > "$PROTOKOLL"
         lauf() {
           if ! "$@" 2>&1 | tee -a "$PROTOKOLL"; then
-            echo "::group::Letzte Zeilen vor dem Abbruch"
-            tail -30 "$PROTOKOLL" | while IFS= read -r zeile; do echo "::error::$zeile"; done
-            echo "::endgroup::"
             echo "::error::gescheitert: $*"
+            grep -aE "error: in |fatal error|failure(s)? (is|are) detected|Test setup error" \
+              "$PROTOKOLL" | tail -6 | while IFS= read -r zeile; do echo "::error::$zeile"; done
+            tail -4 "$PROTOKOLL" | while IFS= read -r zeile; do echo "::error::Ende: $zeile"; done
             exit 1
           fi
-          # Zwischen den Binaries aufraeumen: die Testprogramme legen ihre Datenverzeichnisse
-          # unter /tmp/graphene* an, und das naechste soll keinen fremden Zustand vorfinden.
-          rm -rf /tmp/graphene*
         }
+        # Reihenfolge und Aufraeumpunkte bleiben exakt so, wie der gruene Debug-Lauf sie
+        # hatte. Insbesondere wird zwischen den beiden es_test-Laeufen NICHT aufgeraeumt:
+        # der zweite laeuft mit gesetzter Elasticsearch-Adresse auf dem Zustand des ersten.
+        # Ein Versuch, das Aufraeumen in die Funktion zu falten, hat genau daran einen
+        # zuvor gruenen Debug-Lauf zerbrochen.
         lauf _build/tests/app_test -l test_suite
+        df -h
+        rm -rf /tmp/graphene*
         lauf _build/tests/es_test -l test_suite
         export GRAPHENE_TESTING_ES_URL=http://127.0.0.1:9201/
         lauf _build/tests/es_test -l test_suite
+        df -h
+        rm -rf /tmp/graphene*
         lauf libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l test_suite
+        df -h
+        rm -rf /tmp/graphene*
         lauf _build/tests/cli_test -l test_suite
         df -h
+        rm -rf /tmp/graphene*
     - name: Quick test for program arguments
       run: |
         _build/programs/witness_node/witness_node --version
