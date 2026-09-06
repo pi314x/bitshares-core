@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <unistd.h>   // ::close, for the reserved p2p probe socket
+
 #include <fc/io/json.hpp>
 
 #include <boost/filesystem/path.hpp>
@@ -206,6 +208,10 @@ struct database_fixture_base {
    // the reason we use an app is to exercise the indexes of built-in
    //   plugins
    graphene::app::application app;
+
+   /// The probe socket from init_options, kept open until just before app.startup() so the
+   /// port cannot be taken in between. Closed by init(); -1 when no p2p port was reserved.
+   int p2p_probe_fd = -1;
    genesis_state_type genesis_state;
    chain::database &db;
    signed_transaction trx;
@@ -242,8 +248,7 @@ struct database_fixture_base {
    void vote_for_committee_and_witnesses(uint16_t num_committee, uint16_t num_witness);
    signed_block generate_block(uint32_t skip = ~0,
                                const fc::ecc::private_key& key = generate_private_key("null_key"),
-                               int miss_blocks = 0,
-                               const fc::optional<fc::pq_private_key>& pq_key = fc::optional<fc::pq_private_key>());
+                               int miss_blocks = 0);
 
    /**
     * @brief Generates block_count blocks
@@ -644,6 +649,23 @@ struct database_fixture_init : database_fixture_base {
       auto options = F::init_options( fixture );
       fc::set_option( *options, "genesis-json", boost::filesystem::path(fixture.data_dir.path() / "genesis.json") );
       fixture.app.initialize( fixture.data_dir.path(), options );
+
+      // Release the reserved p2p port here and nowhere earlier. init_options probes a port
+      // and has to let go of it before the node can bind it -- SO_REUSEADDR does not let two
+      // live sockets share a port -- so there is a window in which anything on the machine
+      // can take it, and on CI something occasionally does:
+      //
+      //     bind: Address already in use
+      //
+      // Holding the probe open across initialize() shrinks that window from the whole
+      // initialisation down to the few instructions between this close and the bind inside
+      // startup(). It does not close it: that cannot be done from out here.
+      if( fixture.p2p_probe_fd >= 0 )
+      {
+         ::close( fixture.p2p_probe_fd );
+         fixture.p2p_probe_fd = -1;
+      }
+
       fixture.app.startup();
 
       fixture.generate_block();
