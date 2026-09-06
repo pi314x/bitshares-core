@@ -126,6 +126,13 @@ jobs:
         lauf() {
           if ! "$@" 2>&1 | tee -a "$PROTOKOLL"; then
             echo "::error::gescheitert: $*"
+            # Wer hielt den Port? Bei "Address already in use" hat bisher jede Runde mit
+            # Raten geendet -- Betriebsmittel, Parallelitaet, Zustandsreste -- weil die
+            # Meldung den Halter nicht nennt. ss sagt es, solange der Prozess noch lebt.
+            if command -v ss >/dev/null 2>&1 && grep -q "Address already in use" "$PROTOKOLL"; then
+              ss -ltnp 2>/dev/null | awk 'NR==1 || ($4 ~ /:[0-9]+$/)' | head -12 \
+                | while IFS= read -r zeile; do echo "::error::Listener: $zeile"; done
+            fi
             grep -aE "error: in |fatal error|failure(s)? (is|are) detected|Test setup error" \
               "$PROTOKOLL" | tail -6 | while IFS= read -r zeile; do echo "::error::$zeile"; done
             tail -4 "$PROTOKOLL" | while IFS= read -r zeile; do echo "::error::Ende: $zeile"; done
