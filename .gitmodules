@@ -4,14 +4,14 @@
     ignore = dirty
 [submodule "libraries/fc"]
     path = libraries/fc
-    # Points at the fork while the post-quantum work is unmerged: the pinned commit carries
-    # fc/crypto/pqc.* , vendor/pqclean/ and fc::raw::pq_format, none of which exist upstream,
-    # so a clone against bitshares/bitshares-fc cannot build this branch. It also carries
-    # cmake_minimum_required 3.2 -> 3.5, without which CMake 4 refuses to configure at all.
-    # Revert to the upstream URL once the fc side is merged.
+    # The only branch still pinned to the fork, and only for the post-quantum work:
+    # fc/crypto/pqc.* , vendor/pqclean/ and fc::raw::pq_format do not exist upstream, so a
+    # clone against bitshares/bitshares-fc cannot build this branch. Revert to the upstream
+    # URL once the fc side is merged.
     #
-    # The branch now sits on upstream master, which has since absorbed the OpenSSL 1.1+/3.x
-    # fixes and the missing <cstdint> in string.hpp that used to be carried here as well.
+    # The pinned commit is upstream master plus exactly those commits -- nothing else. The
+    # OpenSSL 1.1+/3.x handling and the missing <cstdint> in string.hpp used to be carried
+    # here too and are upstream now.
     url = https://github.com/pi314x/bitshares-fc.git
     branch = pq-hardfork-review
     ignore = dirty
