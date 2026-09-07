@@ -4289,25 +4289,53 @@ namespace graphene { namespace net { namespace detail {
       assert(_node_public_key != fc::ecc::public_key_data());
 
       fc::ip::endpoint listen_endpoint = _node_configuration.listen_endpoint;
-      if( listen_endpoint.port() != 0 )
-      {
-        // if the user specified a port, we only want to bind to it if it's not already
-        // being used by another application.  During normal operation, we set the
-        // SO_REUSEADDR/SO_REUSEPORT flags so that we can bind outbound sockets to the
-        // same local endpoint as we're listening on here.  On some platforms, setting
-        // those flags will prevent us from detecting that other applications are
-        // listening on that port.  We'd like to detect that, so we'll set up a temporary
-        // tcp server without that flag to see if we can listen on that port.
-        // Note: There is a race condition where another application may start listening
-        //       on the same port just after the temporary tcp server is destroyed and
-        //       before we try to listen with the real tcp server.
-        //       This happens frequently when running multiple test cases at the same
-        //       time, but less likely in production.
-        bool first = true;
-        for( ;; )
-        {
-          bool listen_failed = false;
 
+      // Called when a port we wanted turns out to be taken. Either waits for it to become
+      // free, or gives up on it and asks the OS for any port instead.
+      bool first = true;
+      auto handle_busy_endpoint = [ this, &listen_endpoint, &first ]()
+      {
+        if( _node_configuration.wait_if_endpoint_is_busy )
+        {
+          std::ostringstream error_message_stream;
+          if( first )
+          {
+            error_message_stream << "Unable to listen for connections on port " << listen_endpoint.port()
+                                 << ", retrying in a few seconds\n";
+            error_message_stream << "You can wait for it to become available, or restart this program using\n";
+            error_message_stream << "the --p2p-endpoint option to specify another port\n";
+            first = false;
+          }
+          else
+          {
+            error_message_stream << "\nStill waiting for port " << listen_endpoint.port() << " to become available\n";
+          }
+          std::string error_message = error_message_stream.str();
+          wlog(error_message);
+          std::cout << "\033[31m" << error_message;
+          _delegate->error_encountered( error_message, fc::oexception() );
+          fc::usleep( fc::seconds(5 ) );
+        }
+        else // don't wait, just find a random port
+        {
+          wlog( "unable to bind on the requested endpoint ${endpoint}, which probably means that endpoint is already in use",
+               ( "endpoint", listen_endpoint ) );
+          listen_endpoint.set_port( 0 );
+        }
+      };
+
+      for( ;; )
+      {
+        if( listen_endpoint.port() != 0 )
+        {
+          // if the user specified a port, we only want to bind to it if it's not already
+          // being used by another application.  During normal operation, we set the
+          // SO_REUSEADDR/SO_REUSEPORT flags so that we can bind outbound sockets to the
+          // same local endpoint as we're listening on here.  On some platforms, setting
+          // those flags will prevent us from detecting that other applications are
+          // listening on that port.  We'd like to detect that, so we'll set up a temporary
+          // tcp server without that flag to see if we can listen on that port.
+          bool probe_failed = false;
           try
           {
             fc::tcp_server temporary_server;
@@ -4315,66 +4343,53 @@ namespace graphene { namespace net { namespace detail {
               temporary_server.listen( listen_endpoint );
             else
               temporary_server.listen( listen_endpoint.port() );
-            break;
           }
           catch ( const fc::exception&)
           {
-            listen_failed = true;
+            probe_failed = true;
           }
 
-          if (listen_failed)
+          if( probe_failed )
           {
-            if( _node_configuration.wait_if_endpoint_is_busy )
-            {
-              std::ostringstream error_message_stream;
-              if( first )
-              {
-                error_message_stream << "Unable to listen for connections on port " << listen_endpoint.port()
-                                     << ", retrying in a few seconds\n";
-                error_message_stream << "You can wait for it to become available, or restart this program using\n";
-                error_message_stream << "the --p2p-endpoint option to specify another port\n";
-                first = false;
-              }
-              else
-              {
-                error_message_stream << "\nStill waiting for port " << listen_endpoint.port() << " to become available\n";
-              }
-              std::string error_message = error_message_stream.str();
-              wlog(error_message);
-              std::cout << "\033[31m" << error_message;  
-              _delegate->error_encountered( error_message, fc::oexception() );
-              fc::usleep( fc::seconds(5 ) );
-            }
-            else // don't wait, just find a random port
-            {
-              wlog( "unable to bind on the requested endpoint ${endpoint}, which probably means that endpoint is already in use",
-                   ( "endpoint", listen_endpoint ) );
-              listen_endpoint.set_port( 0 );
-            }
-          } // if (listen_failed)
-        } // for(;;)
-      } // if (listen_endpoint.port() != 0)
-      else // port is 0
-      {
-        // if they requested a random port, we'll just assume it's available
-        // (it may not be due to ip address, but we'll detect that in the next step)
-      }
+            handle_busy_endpoint();
+            continue;
+          }
+        }
+        // else: they requested a random port, so there is nothing to probe -- if the
+        // address turns out to be unusable the real listen below will say so.
 
-      _tcp_server.set_reuse_address();
-      try
-      {
-        if( listen_endpoint.get_address() != fc::ip::address() )
-          _tcp_server.listen( listen_endpoint );
-        else
-          _tcp_server.listen( listen_endpoint.port() );
-        _actual_listening_endpoint = _tcp_server.get_local_endpoint();
-        ilog( "listening for connections on endpoint ${endpoint} (our first choice)",
-              ( "endpoint", _actual_listening_endpoint ) );
-      }
-      catch ( fc::exception& e )
-      {
-        FC_RETHROW_EXCEPTION( e, error, "unable to listen on ${endpoint}", ("endpoint",listen_endpoint ) );
-      }
+        // The probe above closed its socket before we get here, so between that and the
+        // listen below the port is held by nobody and another process can take it. That
+        // window cannot be closed: the probe has to let go before the real server can bind.
+        // What used to happen then was an exception out of this function, killing the node
+        // over a port that was free a moment earlier -- and with several test cases running
+        // at once, that was frequent. So a lost race is now treated exactly like finding
+        // the port busy in the first place: wait for it, or fall back to a random port.
+        _tcp_server.close();  // discard any acceptor left over from a previous attempt
+        _tcp_server.set_reuse_address();
+        try
+        {
+          if( listen_endpoint.get_address() != fc::ip::address() )
+            _tcp_server.listen( listen_endpoint );
+          else
+            _tcp_server.listen( listen_endpoint.port() );
+          _actual_listening_endpoint = _tcp_server.get_local_endpoint();
+          ilog( "listening for connections on endpoint ${endpoint} (our first choice)",
+                ( "endpoint", _actual_listening_endpoint ) );
+          return;
+        }
+        catch ( fc::exception& e )
+        {
+          // A random port failing is not a race with anyone -- the OS had a whole range to
+          // choose from -- so it is a real error and stays fatal.
+          if( 0 == listen_endpoint.port() )
+            FC_RETHROW_EXCEPTION( e, error, "unable to listen on ${endpoint}", ("endpoint",listen_endpoint ) );
+
+          wlog( "lost the race for endpoint ${endpoint} between checking it and listening on it",
+                ( "endpoint", listen_endpoint ) );
+          handle_busy_endpoint();
+        }
+      } // for(;;)
     }
 
     void node_impl::connect_to_p2p_network(node_impl_ptr self)

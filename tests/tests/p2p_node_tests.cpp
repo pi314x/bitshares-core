@@ -880,6 +880,113 @@ BOOST_AUTO_TEST_CASE( set_nothing_advertise_algorithm )
    test_address_message( msg, 0 );
 }
 
+/****
+ * Listening on a port that is free -- the ordinary case, and the baseline the two
+ * failure cases below are measured against.
+ */
+BOOST_AUTO_TEST_CASE( listen_on_available_port )
+{ try {
+   const int port = fc::network::get_available_port();
+   fc::temp_directory dir( graphene::utilities::temp_directory_path() );
+   test_node node( "ListenOk", dir.path(), port );
+
+   node.set_listen_endpoint( fc::ip::endpoint( fc::ip::address("127.0.0.1"), port ), false );
+   node.listen_to_p2p_network();
+
+   BOOST_CHECK_EQUAL( node.get_actual_listening_endpoint().port(), port );
+} FC_LOG_AND_RETHROW() }
+
+/****
+ * Listening on a port somebody else already holds, with wait_if_not_available = false.
+ *
+ * The node is expected to give up on that port and take any free one instead. Before the
+ * fix for #2834 this only worked when the port was busy at the moment of the probe; if it
+ * was taken between the probe and the real listen, the exception escaped and killed the
+ * node. This test covers the branch, not the race -- the race cannot be triggered on
+ * demand, since the window is now two statements wide.
+ */
+BOOST_AUTO_TEST_CASE( listen_on_busy_port_without_waiting )
+{ try {
+   const int port = fc::network::get_available_port();
+
+   // Hold the port for the whole test.
+   fc::tcp_server occupied;
+   occupied.listen( fc::ip::endpoint( fc::ip::address("127.0.0.1"), port ) );
+
+   fc::temp_directory dir( graphene::utilities::temp_directory_path() );
+   test_node node( "ListenBusy", dir.path(), port );
+
+   node.set_listen_endpoint( fc::ip::endpoint( fc::ip::address("127.0.0.1"), port ), false );
+   node.listen_to_p2p_network();
+
+   const auto actual = node.get_actual_listening_endpoint();
+   BOOST_CHECK( actual.port() != 0 );
+   BOOST_CHECK_MESSAGE( actual.port() != port,
+                        "the node should have moved off the occupied port, but reports "
+                        + std::string( actual ) );
+} FC_LOG_AND_RETHROW() }
+
+/****
+ * Same, but with wait_if_not_available = true: the node should keep the port it was asked
+ * for and wait until it becomes free, rather than moving elsewhere.
+ *
+ * The holder is released from another fiber after a few seconds. The retry interval in
+ * listen_to_p2p_network is 5 seconds, so this takes on the order of ten.
+ */
+BOOST_AUTO_TEST_CASE( listen_on_busy_port_waiting_for_it )
+{ try {
+   const int port = fc::network::get_available_port();
+
+   auto occupied = std::make_shared<fc::tcp_server>();
+   occupied->listen( fc::ip::endpoint( fc::ip::address("127.0.0.1"), port ) );
+
+   // Let go of the port while the node is waiting for it.
+   fc::async( [occupied]() {
+      fc::usleep( fc::seconds(3) );
+      occupied->close();
+   }, "release the occupied port" );
+
+   fc::temp_directory dir( graphene::utilities::temp_directory_path() );
+   test_node node( "ListenWait", dir.path(), port );
+
+   node.set_listen_endpoint( fc::ip::endpoint( fc::ip::address("127.0.0.1"), port ), true );
+   node.listen_to_p2p_network();
+
+   BOOST_CHECK_EQUAL( node.get_actual_listening_endpoint().port(), port );
+} FC_LOG_AND_RETHROW() }
+
+/**
+ * The #2834 fix retries the real listen() on _tcp_server itself, not only on the throwaway
+ * probe server, and begins every retry with close(). That is only safe if a tcp_server whose
+ * listen() has thrown can be listened on again afterwards.
+ *
+ * This does not exercise node code at all -- it pins down the fc behaviour the fix is built
+ * on. The three tests above would all still pass if that behaviour changed, because none of
+ * them ever makes the real listen() fail; this one would start failing, which is the point.
+ */
+BOOST_AUTO_TEST_CASE( tcp_server_reuse_after_failed_listen )
+{
+   const int busy_port = fc::network::get_available_port();
+
+   fc::tcp_server occupied;
+   occupied.listen( fc::ip::endpoint( fc::ip::address("127.0.0.1"), busy_port ) );
+
+   fc::tcp_server server;
+   server.set_reuse_address();
+   BOOST_CHECK_THROW(
+      server.listen( fc::ip::endpoint( fc::ip::address("127.0.0.1"), busy_port ) ),
+      fc::exception );
+
+   // What the retry loop does before trying again.
+   server.close();
+
+   const int free_port = fc::network::get_available_port();
+   BOOST_CHECK_NO_THROW(
+      server.listen( fc::ip::endpoint( fc::ip::address("127.0.0.1"), free_port ) ) );
+   BOOST_CHECK_EQUAL( server.get_local_endpoint().port(), free_port );
+   server.close();
+}
+
 BOOST_AUTO_TEST_CASE( advertise_list_test )
 {
    // create a node (node1)
