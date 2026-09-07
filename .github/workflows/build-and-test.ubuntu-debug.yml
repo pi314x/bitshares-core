@@ -111,6 +111,15 @@ jobs:
         # Adminrechte kann sagen, woran es lag.
         set -o pipefail
         if ! make -j 2 -C _build 2>&1 | tee "$GITHUB_WORKSPACE/build.log"; then
+          # Fehlerzeilen zuerst: make -j2 laeuft nach einem Fehler mit anderen Zielen
+          # weiter, deren Warnungen das Protokollende fuellen. Ein reines tail zeigt dann
+          # Warnungen und nicht die Ursache -- genau das ist einmal passiert und hat eine
+          # falsche Diagnose ausgeloest.
+          echo "::group::Fehlermeldungen"
+          grep -aE "error:|Error [0-9]|cannot find -l|undefined reference|No space left" \
+            "$GITHUB_WORKSPACE/build.log" | head -8 \
+            | while IFS= read -r zeile; do echo "::error::$zeile"; done
+          echo "::endgroup::"
           echo "::group::Letzte Zeilen des Baus"
           # Das ENDE des Protokolls, nicht eine Auswahl daraus. Ein Filter zeigt nichts,
           # wenn der Prozess abgeschossen wurde -- dann steht dort weder "error:" noch
