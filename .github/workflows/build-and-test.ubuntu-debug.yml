@@ -156,6 +156,13 @@ jobs:
             # Wer hielt den Port? Bei "Address already in use" hat bisher jede Runde mit
             # Raten geendet -- Betriebsmittel, Parallelitaet, Zustandsreste -- weil die
             # Meldung den Halter nicht nennt. ss sagt es, solange der Prozess noch lebt.
+            # Welchen Port hat das Fixture gewaehlt? Es gibt ihn per idump aus, bevor es
+            # ihn setzt. Ohne diese Zeile steht der belegte Port nirgends und die
+            # Listener-Liste laesst sich nicht dagegen halten.
+            if grep -q "Address already in use" "$PROTOKOLL"; then
+              grep -aE "p2p-endpoint|\bep:|Configured p2p node to listen" "$PROTOKOLL" \
+                | tail -3 | while IFS= read -r zeile; do echo "::error::Portwahl: $zeile"; done
+            fi
             if command -v ss >/dev/null 2>&1 && grep -q "Address already in use" "$PROTOKOLL"; then
               ss -ltnp 2>/dev/null | awk 'NR==1 || ($4 ~ /:[0-9]+$/)' | head -12 \
                 | while IFS= read -r zeile; do echo "::error::Listener: $zeile"; done
