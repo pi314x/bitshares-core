@@ -79,7 +79,15 @@ namespace graphene { namespace protocol {
       /// A submission older than this stops counting toward the aggregate.
       uint32_t value_lifetime_sec = 86400;
 
-      oracle_aggregation_method aggregation = oracle_aggregation_method::median_of_latest;
+      /**
+       * Aggregation method, held as the underlying integer of @ref oracle_aggregation_method.
+       *
+       * Protocol data, so not the enum type itself: fc reflects an enum as a signed 64-bit
+       * value, which both wastes space in every signed transaction and moves the rejection of
+       * an unknown method into deserialisation instead of validate(). The existing protocol
+       * does the same with black_swan_response_method. Read it through get_aggregation().
+       */
+      uint8_t aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
 
       /// Window for median_over_window. Ignored by median_of_latest.
       uint32_t window_sec = 3600;
@@ -96,6 +104,10 @@ namespace graphene { namespace protocol {
       uint32_t max_deviation_ppm = 0;
 
       extensions_type extensions;
+
+      /// @return the aggregation method; only valid after validate() has accepted the value
+      oracle_aggregation_method get_aggregation()const
+      { return static_cast<oracle_aggregation_method>( aggregation ); }
 
       void validate()const;
    };
