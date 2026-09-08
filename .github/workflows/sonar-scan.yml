@@ -178,13 +178,30 @@ jobs:
         df -h
     - name: Prepare for scanning with SonarScanner
       run: |
-        programs/build_helpers/set_sonar_branch_for_github_actions sonar-project.properties
+        # This step reports only "exit code 64" and its log needs admin rights to read, so
+        # each command has to say for itself whether it was the one that failed.
+        if ! programs/build_helpers/set_sonar_branch_for_github_actions sonar-project.properties; then
+          echo "::error::set_sonar_branch_for_github_actions failed"
+          exit 1
+        fi
+        echo "gcovr version: $(gcovr --version 2>&1 | head -1)"
         pushd _build
-        gcovr --version
+        echo "cwd=$(pwd)"
+        echo "root as gcovr sees it: $(cd .. && pwd)"
+        ls -d ../libraries ../programs >/dev/null 2>&1 \
+          || echo "::error::the repository root does not look right from inside _build"
+        set +e
         gcovr --exclude-unreachable-branches --exclude-throw-branches \
               --exclude '\.\./programs/' \
               --exclude '\.\./tests/' \
               --sonarqube ../coverage.xml -r ..
+        rc=$?
+        set -e
+        if [ $rc -ne 0 ]; then
+          # gcovr's own exit codes: 64 is a command line or root-directory error, 65 a read error.
+          echo "::error::gcovr exited ${rc} (64=cmdline/root, 65=read), version $(gcovr --version 2>&1 | head -1)"
+          exit $rc
+        fi
         popd
     - name: Scan with SonarScanner
       env:
