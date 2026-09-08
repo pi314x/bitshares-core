@@ -197,7 +197,7 @@ void oracle_object::update_current_value( time_point_sec now )
    if( history.size() > size_t( GRAPHENE_ORACLE_MAX_HISTORY ) )
       history.erase( history.begin() );
 
-   if( oracle_aggregation_method::median_of_latest == options.aggregation )
+   if( oracle_aggregation_method::median_of_latest == options.get_aggregation() )
    {
       current_value = latest;
       return;
