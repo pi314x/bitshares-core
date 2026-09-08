@@ -152,7 +152,12 @@ jobs:
         rm -rf _build/programs/genesis_util/get_dev_key
         df -h
     - name: Unit-Tests
-      timeout-minutes: 15
+      # The other workflows run these binaries in 15 minutes, but this job builds them Debug
+      # with --coverage, which is several times slower to execute. At 15 minutes the step was
+      # killed mid-run ("The action 'Unit-Tests' has timed out after 15 minutes"), so the
+      # scanner steps after it never ran at all and the whole workflow had never once reported
+      # on the code it was supposed to scan.
+      timeout-minutes: 45
       run: |
         _build/tests/app_test -l test_suite
         df -h
