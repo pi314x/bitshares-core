@@ -44,6 +44,29 @@ BOOST_AUTO_TEST_CASE( valid_and_invalid_oracle_names )
    BOOST_CHECK( !is_valid_oracle_name( "BTC.-USD" ) );      // mixed repeated separator
 }
 
+BOOST_AUTO_TEST_CASE( an_unknown_aggregation_method_is_refused )
+{
+   oracle_options opts;
+   opts.producers[ account_id_type( 1 ) ] = 1;
+   opts.minimum_producers = 1;
+
+   opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
+   BOOST_CHECK_NO_THROW( opts.validate() );
+   BOOST_CHECK( oracle_aggregation_method::median_of_latest == opts.get_aggregation() );
+
+   opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_over_window );
+   BOOST_CHECK_NO_THROW( opts.validate() );
+   BOOST_CHECK( oracle_aggregation_method::median_over_window == opts.get_aggregation() );
+
+   // The method travels as a plain integer, so deserialisation no longer rejects an unknown
+   // one the way it would for a reflected enum -- validate() has to. Without this, nodes
+   // would be asked to agree on an aggregation none of them implements.
+   opts.aggregation = 2;
+   BOOST_CHECK_THROW( opts.validate(), fc::exception );
+   opts.aggregation = 255;
+   BOOST_CHECK_THROW( opts.validate(), fc::exception );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE( oracle_tests, database_fixture )
@@ -550,7 +573,7 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_resists_a_single_spike )
    opts.producers[bob_id]  = 1;
    opts.minimum_producers  = 1;
    opts.value_lifetime_sec = 86400;
-   opts.aggregation        = oracle_aggregation_method::median_over_window;
+   opts.aggregation        = static_cast<uint8_t>( oracle_aggregation_method::median_over_window );
    // A window commensurate with the test's own timescale. History samples at
    // window_sec/MAX_HISTORY, so a day-long window buckets at ~22 minutes and publishes five
    // seconds apart all collapse into one sample -- there would be no history to damp with.
@@ -650,7 +673,7 @@ BOOST_AUTO_TEST_CASE( the_deviation_filter_cannot_let_a_minority_capture_the_pri
    opts.producers[ mallory_id ] = 1;
    opts.minimum_producers = 1;      // the shipped default
    opts.max_deviation_ppm = 100000; // 10% band -- a plausible "manipulation resistance" setting
-   opts.aggregation = oracle_aggregation_method::median_of_latest;
+   opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
 
    const auto oid = make_oracle( owner_id, owner_private_key, "CORE.USD", opts );
 
@@ -718,7 +741,7 @@ BOOST_AUTO_TEST_CASE( without_the_deviation_filter_the_majority_wins )
    opts.producers[ mallory_id ] = 1;
    opts.minimum_producers = 1;
    opts.max_deviation_ppm = 0;      // off
-   opts.aggregation = oracle_aggregation_method::median_of_latest;
+   opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
 
    const auto oid = make_oracle( owner_id, owner_private_key, "CORE.USD", opts );
 
@@ -768,7 +791,7 @@ BOOST_AUTO_TEST_CASE( the_owner_can_flip_the_value_by_reweighting_alone )
    opts.producers[ p2_id ] = 1;
    opts.producers[ p3_id ] = 1;
    opts.minimum_producers = 1;
-   opts.aggregation = oracle_aggregation_method::median_of_latest;
+   opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
    const auto oid = make_oracle( owner_id, owner_private_key, "GOV.TEST", opts );
 
    publish( oid, p1_id, p1_private_key, 100 );
@@ -831,7 +854,7 @@ BOOST_AUTO_TEST_CASE( measure_the_collusion_threshold_of_the_median )
       oracle_options opts;
       for( size_t i = 0; i < n; ++i ) opts.producers[ ids[i] ] = 1;
       opts.minimum_producers = 1;
-      opts.aggregation = oracle_aggregation_method::median_of_latest;
+      opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
       const auto oid = make_oracle( owner_id, owner_private_key,
                                     "COL" + std::to_string( n ), opts );
 
@@ -884,7 +907,7 @@ BOOST_AUTO_TEST_CASE( measure_the_on_chain_cost_of_publishing_a_false_value )
    oracle_options opts;
    opts.producers[ liar_id ] = 1;
    opts.minimum_producers = 1;
-   opts.aggregation = oracle_aggregation_method::median_of_latest;
+   opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
    const auto oid = make_oracle( owner_id, owner_private_key, "COST.TEST", opts );
 
    const int64_t before = get_balance( liar_id, core_id );
@@ -1436,7 +1459,7 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_covers_its_configured_window_however_oft
    cop.quote_asset = asset_id_type();
    cop.options.producers[bob_id] = 1;
    cop.options.minimum_producers = 1;
-   cop.options.aggregation       = oracle_aggregation_method::median_over_window;
+   cop.options.aggregation       = static_cast<uint8_t>( oracle_aggregation_method::median_over_window );
    cop.options.window_sec        = window;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
