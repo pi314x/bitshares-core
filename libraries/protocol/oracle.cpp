@@ -87,7 +87,13 @@ void oracle_options::validate()const
 
    FC_ASSERT( value_lifetime_sec > 0, "value_lifetime_sec should be positive" );
 
-   if( oracle_aggregation_method::median_over_window == aggregation )
+   // With the method held as a plain integer, an unknown value no longer fails at
+   // deserialisation, so it has to fail here -- otherwise nodes would have to agree on how to
+   // aggregate using a method none of them knows.
+   FC_ASSERT( aggregation <= static_cast<uint8_t>( oracle_aggregation_method::median_over_window ),
+              "Unknown aggregation method ${a}", ("a", aggregation) );
+
+   if( oracle_aggregation_method::median_over_window == get_aggregation() )
       FC_ASSERT( window_sec > 0,
                  "window_sec should be positive when aggregating over a window" );
 
