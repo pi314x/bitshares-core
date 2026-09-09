@@ -194,12 +194,18 @@ jobs:
         gcovr --exclude-unreachable-branches --exclude-throw-branches \
               --exclude '\.\./programs/' \
               --exclude '\.\./tests/' \
-              --sonarqube ../coverage.xml -r ..
+              --sonarqube ../coverage.xml -r .. > ../gcovr.out 2>&1
         rc=$?
         set -e
         if [ $rc -ne 0 ]; then
-          # gcovr's own exit codes: 64 is a command line or root-directory error, 65 a read error.
-          echo "::error::gcovr exited ${rc} (64=cmdline/root, 65=read), version $(gcovr --version 2>&1 | head -1)"
+          # gcovr 7.0: EXIT_CMDLINE_ERROR is 1, EXIT_READ_ERROR is 64. A 64 therefore means
+          # it could not read the coverage data, and it logs the exception before exiting --
+          # which is in the step log, and the step log needs admin rights on the repository.
+          # So the lines that name the cause are lifted into annotations here.
+          echo "::error::gcovr exited ${rc} (64 = read error), $(gcovr --version 2>&1 | head -1)"
+          grep -aE '\(ERROR\)|Error occurred|Exception|No such file|not found|version' ../gcovr.out \
+            | head -6 | while IFS= read -r line; do echo "::error::gcovr: ${line}"; done
+          tail -4 ../gcovr.out | while IFS= read -r line; do echo "::error::gcovr tail: ${line}"; done
           exit $rc
         fi
         popd
