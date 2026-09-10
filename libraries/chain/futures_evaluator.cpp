@@ -496,6 +496,20 @@ share_type apply_fill( database& d, const futures_market_object& market, account
 
    if( 0 == new_size.value )
    {
+      // Funding first, because margin only moves when the position is touched.
+      //
+      // This is the one path through a fill that used neither settle_to_mark nor
+      // apply_funding: a position opened once, held across any number of funding intervals
+      // and then closed in a single fill was paid out on the margin it carried before the
+      // first of them. Everything it owed stayed in cumulative_funding, unclaimed, while the
+      // other side of the market had already paid into the settlement pool -- so the pool,
+      // not the trader, carried it. The behaviour needed to collect it was simply to never
+      // touch the position: no margin adjustment, no partial fill, one order in and one out.
+      //
+      // apply_funding is a no-op when nothing has accrued, and it moves size x (index delta)
+      // into the pool, which is exactly where the counterparty's side of it already sits.
+      apply_funding( d, market, pos );
+
       // Flat. unrealized = 0 x mark - entry_value = -entry_value, exactly the realised PnL,
       // so the payout is margin - entry_value with no rounding anywhere.
       const share_type final_entry = pos.entry_value + delta_value;

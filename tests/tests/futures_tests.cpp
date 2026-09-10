@@ -1911,6 +1911,97 @@ BOOST_AUTO_TEST_CASE( the_premium_is_not_truncated_away_by_its_own_arithmetic )
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
+/// Funding has to be collected when a position is closed outright, not only when it is
+/// touched along the way.
+///
+/// margin moves only when a position is touched, and closing a position to flat used to be the
+/// one path through a fill that touched neither settle_to_mark nor apply_funding. A position
+/// opened once, held across funding intervals and closed in a single fill was therefore paid
+/// out on the margin it carried before any of them, and everything it owed stayed in
+/// cumulative_funding unclaimed -- carried by the settlement pool, which the other side had
+/// already paid into.
+///
+/// bob and carol are exactly symmetric here: same size, same open price, same close price, so
+/// their PnL is zero and their margins are equal. The only thing that can separate their
+/// balances is funding, and with a funding index of 1 over ten contracts it has to separate
+/// them by exactly 20.
+BOOST_AUTO_TEST_CASE( closing_a_position_outright_still_pays_its_funding )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;
+   cop.options.max_funding_rate_ppm = 10000;   // 1% of a mark of 100 == a cap of 1
+   cop.options.taker_fee_ppm        = 0;       // fees would break the symmetry below
+   cop.options.maker_rebate_ppm     = 0;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // bob long 10, carol short 10, both at the mark
+   place( mid, bob_id,   bob_private_key,   true,  100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+
+   // A book above the mark, so the premium is positive and longs pay.
+   const futures_order_id_type dan_bid {
+      place( mid, dan_id,   dan_private_key,   true,  104, 1 ) };
+   const futures_order_id_type alice_ask {
+      place( mid, alice_id, alice_private_key, false, 108, 1 ) };
+
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+   BOOST_REQUIRE_EQUAL( mid(db).cumulative_funding.value, 1 );
+
+   // The book has done its job. It has to come off before bob and carol close against each
+   // other, because dan's bid of 104 is better than the 100 bob is selling at: leaving it
+   // there sells him a contract at 104, and then carol has only nine to buy and keeps a
+   // position. Their close would no longer be the symmetric one this test measures.
+   cancel( dan_bid,   dan_id,   dan_private_key );
+   cancel( alice_ask, alice_id, alice_private_key );
+
+   // Neither position has been touched since it was opened.
+   BOOST_REQUIRE_EQUAL( position_of( mid, bob_id )->last_cumulative_funding.value, 0 );
+   BOOST_REQUIRE_EQUAL( position_of( mid, carol_id )->last_cumulative_funding.value, 0 );
+
+   const auto bob_before   = db.get_balance( bob_id, core_id ).amount;
+   const auto carol_before = db.get_balance( carol_id, core_id ).amount;
+
+   // Both close outright, in one fill each, against each other at the price they opened at.
+   place( mid, bob_id,   bob_private_key,   false, 100, 10 );
+   place( mid, carol_id, carol_private_key, true,  100, 10 );
+
+   BOOST_CHECK( !position_of( mid, bob_id ) );
+   BOOST_CHECK( !position_of( mid, carol_id ) );
+
+   const auto bob_gain   = db.get_balance( bob_id, core_id ).amount - bob_before;
+   const auto carol_gain = db.get_balance( carol_id, core_id ).amount - carol_before;
+
+   // bob is long 10 and owes 10; carol is short 10 and is owed 10.
+   BOOST_CHECK_EQUAL( ( carol_gain - bob_gain ).value, 20 );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
 /// A funding cap below 100 ppm must still work. It used to be converted into
 /// GRAPHENE_100_PERCENT units by an integer divide by 100, which turned every rate under
 /// 100 ppm into zero and switched funding off without saying so.
