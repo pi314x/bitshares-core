@@ -1841,6 +1841,76 @@ BOOST_AUTO_TEST_CASE( funding_transfers_from_longs_to_shorts_when_the_book_is_ab
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
+/// The premium used to be built from three separate integer divisions -- impact_bid,
+/// impact_ask, then their mid -- and with every operand positive all three truncated the same
+/// way, so the premium came out low by up to about 1.5 units in every sample.
+///
+/// Here the book sits at bids 99 and 100 against asks 102 and 103, so the impact prices are
+/// 99.5 and 102.5 and the true mid is 101: a premium of exactly 1 over a mark of 100. Under
+/// the old arithmetic 99.5 floored to 99, 102.5 to 102, and their mid of 100.5 to 100, which
+/// reported a premium of 0 -- funding switched off entirely, on a book a full point above the
+/// mark.
+BOOST_AUTO_TEST_CASE( the_premium_is_not_truncated_away_by_its_own_arithmetic )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   cop.options.funding_interval_sec = 60;
+   cop.options.max_funding_rate_ppm = 10000;   // 1% of a mark of 100 == a cap of 1
+   cop.options.impact_size          = 2;       // both resting orders a side are consumed
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // bob long 10, carol short 10, matched at the mark so nothing of theirs rests
+   place( mid, bob_id, bob_private_key, true, 100, 10 );
+   place( mid, carol_id, carol_private_key, false, 100, 10 );
+   const auto bob_pos   = position_of( mid, bob_id )->get_id();
+   const auto carol_pos = position_of( mid, carol_id )->get_id();
+
+   // The book: two bids and two asks, one contract each, none of them crossing.
+   place( mid, dan_id,   dan_private_key,   true,   99, 1 );
+   place( mid, dan_id,   dan_private_key,   true,  100, 1 );
+   place( mid, alice_id, alice_private_key, false, 102, 1 );
+   place( mid, alice_id, alice_private_key, false, 103, 1 );
+
+   generate_blocks( db.head_block_time() + 120 );
+   set_expiration( db, trx );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   // (99+100)/2 == 99.5, (102+103)/2 == 102.5, mid 101, premium 1 -- exactly the cap.
+   BOOST_CHECK_EQUAL( mid(db).cumulative_funding.value, 1 );
+
+   const auto bob_margin_before   = bob_pos(db).margin;
+   const auto carol_margin_before = carol_pos(db).margin;
+   adjust_margin( bob_pos,   bob_id,   bob_private_key,   1000 );
+   adjust_margin( carol_pos, carol_id, carol_private_key, 1000 );
+
+   BOOST_CHECK_EQUAL( ( bob_pos(db).margin   - bob_margin_before   ).value, 1000 - 10 );
+   BOOST_CHECK_EQUAL( ( carol_pos(db).margin - carol_margin_before ).value, 1000 + 10 );
+
+   check_market_is_balanced( mid );
+} FC_LOG_AND_RETHROW() }
+
 /// A funding cap below 100 ppm must still work. It used to be converted into
 /// GRAPHENE_100_PERCENT units by an integer divide by 100, which turned every rate under
 /// 100 ppm into zero and switched funding off without saying so.
