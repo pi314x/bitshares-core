@@ -159,19 +159,39 @@ jobs:
       # on the code it was supposed to scan.
       timeout-minutes: 45
       run: |
-        _build/tests/app_test -l test_suite
+        # Which of these four fails has never been visible. The step reports "exit code 1" and
+        # nothing else, and the log needs admin rights on the repository, so the same bare
+        # number has been showing up on this branch, on the feature branches and on upstream
+        # develop without ever saying which binary produced it. Each one now names itself.
+        #
+        # Deliberately not a single grouped command with a pipe: a failure in the middle of a
+        # group does not stop the group, and an earlier attempt at this reported success while
+        # a binary underneath it had failed. Every invocation is checked on its own, and the
+        # cleanups between them are left exactly where they were -- the sequence matters.
+        lauf() {
+          echo "+ $*"
+          set +e
+          "$@"
+          local rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::Unit-Tests: $1 exited ${rc}"
+            exit $rc
+          fi
+        }
+        lauf _build/tests/app_test -l test_suite
         df -h
         echo "Cleanup"
         rm -rf /tmp/graphene*
-        _build/tests/es_test -l test_suite
+        lauf _build/tests/es_test -l test_suite
         df -h
         echo "Cleanup"
         rm -rf /tmp/graphene*
-        libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l test_suite
+        lauf libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l test_suite
         df -h
         echo "Cleanup"
         rm -rf /tmp/graphene*
-        _build/tests/cli_test -l test_suite
+        lauf _build/tests/cli_test -l test_suite
         df -h
         echo "Cleanup"
         rm -rf /tmp/graphene*
