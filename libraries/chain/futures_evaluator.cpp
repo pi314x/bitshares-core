@@ -230,11 +230,37 @@ optional<share_type> sample_premium( const database& d, const futures_market_obj
 
    // Both are at least one: the emptiness of either side was ruled out above, and an order
    // that reached the book carries at least one contract.
-   const share_type impact_bid{ static_cast<int64_t>( bid_notional / uint64_t( bid_filled ) ) };
-   const share_type impact_ask{ static_cast<int64_t>( ask_notional / uint64_t( ask_filled ) ) };
+   //
+   // Computed exactly and rounded once, rather than as three separate integer divisions.
+   // Dividing out impact_bid, dividing out impact_ask and then halving their sum truncates
+   // three times, and every operand is positive, so all three truncations go the same way:
+   // the premium came out low by up to about 1.5 units in every sample. A bias that never
+   // changes sign does not average away over an interval, and it is large next to the cap
+   // whenever the mark is small -- with a mark of 100 and impact prices of 100.9 and 101.9
+   // the true premium is 1.4 while the truncated one is 0, so a rate capped at 1% did not
+   // lose a little precision, it read as no premium at all. The same failure mode is already
+   // recorded further down, where an integer divide by 100 collapsed every cap below 100 ppm
+   // to zero.
+   //
+   //   premium = ( bid_notional/bid_filled + ask_notional/ask_filled ) / 2 - mark
+   //           = ( bid_notional*ask_filled + ask_notional*bid_filled - mark*den ) / den
+   //   with      den = 2 * bid_filled * ask_filled
+   //
+   // Bounds: a price is at most GRAPHENE_MAX_SHARE_SUPPLY (1e15) and a side is filled to at
+   // most GRAPHENE_FUTURES_MAX_IMPACT_SIZE (1e6), so a notional is at most 1e21, the
+   // numerator stays below ~4e27 and den below 2e12 -- both far inside __int128.
+   const __int128 den = __int128( 2 ) * bid_filled * ask_filled;
+   const __int128 num = static_cast<__int128>( bid_notional ) * ask_filled
+                      + static_cast<__int128>( ask_notional ) * bid_filled
+                      - static_cast<__int128>( mark.value ) * den;
 
-   const share_type mid = ( impact_bid + impact_ask ) / 2;
-   share_type premium = mid - mark;
+   // Half away from zero, so that a premium and its negation round by the same amount and
+   // neither side of the market is favoured by the rounding itself. den is even by
+   // construction, so half is exact.
+   const __int128 half = den / 2;
+   const __int128 exact = num >= 0 ? ( num + half ) / den
+                                   : -( ( -num + half ) / den );
+   share_type premium{ static_cast<int64_t>( exact ) };
 
    // Clamp each SAMPLE, not just the final average. It bounds the average by construction, and
    // it keeps the weighted sum below in range: an unclamped premium can be as large as the mark
