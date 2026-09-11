@@ -97,7 +97,22 @@ jobs:
         }
         lauf _build/tests/app_test -l test_suite
         lauf _build/tests/es_test -l test_suite
-        lauf libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l message
+        # run-parallel-tests.sh starts one process per test case through GNU parallel and
+        # returns 1 if any of them failed, without saying which. Capture the output and lift
+        # the lines that name the failing case into annotations.
+        set +e
+        libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l message > par.out 2>&1
+        rc=$?
+        set -e
+        if [ $rc -ne 0 ]; then
+          echo "::error::Unit-Tests: run-parallel-tests.sh exited ${rc}"
+          grep -aE 'fatal error|error: in|Address already in use|bind|exception' par.out \
+            | head -8 | while IFS= read -r line; do echo "::error::chain_test: ${line}"; done
+          grep -a '^Running ' par.out | tail -3 | while IFS= read -r line; do
+            echo "::error::last started: ${line}"
+          done
+          exit $rc
+        fi
         lauf _build/tests/cli_test -l test_suite
         df -h
     - name: Quick test for program arguments
