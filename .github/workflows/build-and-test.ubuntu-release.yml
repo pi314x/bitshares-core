@@ -81,10 +81,24 @@ jobs:
     - name: Unit-Tests
       timeout-minutes: 15
       run: |
-        _build/tests/app_test -l test_suite
-        _build/tests/es_test -l test_suite
-        libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l message
-        _build/tests/cli_test -l test_suite
+        # Diagnosezweig: dieser Schritt meldet seit Wochen nur "exit code 1" -- auf diesem
+        # Zweig, auf den anderen Feature-Zweigen und auf upstream develop -- und das Log
+        # verlangt Admin-Rechte. Jede Binaerdatei nennt sich jetzt selbst.
+        lauf() {
+          echo "+ $*"
+          set +e
+          "$@"
+          local rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::Unit-Tests: $1 exited ${rc}"
+            exit $rc
+          fi
+        }
+        lauf _build/tests/app_test -l test_suite
+        lauf _build/tests/es_test -l test_suite
+        lauf libraries/fc/tests/run-parallel-tests.sh _build/tests/chain_test -l message
+        lauf _build/tests/cli_test -l test_suite
         df -h
     - name: Quick test for program arguments
       run: |
