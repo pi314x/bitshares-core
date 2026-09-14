@@ -700,7 +700,21 @@ object_id_type futures_order_create_evaluator::do_apply( const futures_order_cre
          {
             --end;
             if( end->price_per_contract >= op.price_per_contract )
-               best = &(*end);
+            {
+               // Stepping back reaches the highest bid price, but it walks the id tiebreaker
+               // backwards too, and ids increase with time -- so it lands on the NEWEST order
+               // at that price rather than the oldest. The ask side has no such problem: it is
+               // scanned forward, where both price and id ascend, which is what price-time
+               // priority means. Taken as it stood, a resting bid could be jumped indefinitely
+               // by later bids at its own price.
+               //
+               // Seek forward to the first order at that price instead: within one price the
+               // key orders by id, so lower_bound lands on the one that has been waiting
+               // longest.
+               const auto oldest = book.lower_bound( boost::make_tuple(
+                        market.get_id(), true, end->price_per_contract ) );
+               best = &(*oldest);
+            }
          }
       }
       if( nullptr == best )

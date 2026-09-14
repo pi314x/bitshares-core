@@ -2002,6 +2002,55 @@ BOOST_AUTO_TEST_CASE( closing_a_position_outright_still_pays_its_funding )
    check_market_is_balanced( mid );
 } FC_LOG_AND_RETHROW() }
 
+/// Price-time priority has to hold on both sides of the book.
+///
+/// The book is keyed (market, is_long, price, id), and ids increase with time, so scanning
+/// forward gives oldest-first at a price level. That is what a taker who is buying does
+/// against the asks. A taker who is selling walks the bids backwards to reach the highest
+/// price -- and backwards through the id tiebreaker as well, which is newest-first. At one
+/// price level the most recently placed bid was being filled before one that had been resting
+/// there longer, so a maker could be jumped indefinitely by later orders at their own price.
+BOOST_AUTO_TEST_CASE( the_oldest_order_at_a_price_is_filled_first_on_both_sides )
+{ try {
+   generate_blocks( HARDFORK_FUTURES_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   setup_assets();
+
+   ACTORS( (alice)(bob)(carol)(dan) );
+   fund( alice, asset(10000000) ); fund( bob, asset(10000000) );
+   fund( carol, asset(10000000) ); fund( dan, asset(10000000) );
+
+   const auto oid = make_oracle( alice_id, alice_private_key, bob_id );
+   publish( oid, bob_id, bob_private_key, 100 );
+
+   futures_market_create_operation cop;
+   cop.owner            = alice_id;
+   cop.symbol           = "BTC-PERP";
+   cop.oracle_id        = oid;
+   cop.collateral_asset = core_id;
+   cop.contract_size    = 1;
+   signed_transaction ctx;
+   ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   const futures_market_id_type mid {
+      PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
+
+   // --- the bid side: bob rests first, dan rests second, both at 100 ------------------
+   place( mid, bob_id, bob_private_key, true, 100, 1 );
+   place( mid, dan_id, dan_private_key, true, 100, 1 );
+
+   // carol sells one contract into that level
+   place( mid, carol_id, carol_private_key, false, 100, 1 );
+
+   BOOST_CHECK_MESSAGE( position_of( mid, bob_id ),
+                        "bob rested at this price first and should have been filled first" );
+   BOOST_CHECK_MESSAGE( !position_of( mid, dan_id ),
+                        "dan rested at the same price later and should still be waiting" );
+} FC_LOG_AND_RETHROW() }
+
 /// A funding cap below 100 ppm must still work. It used to be converted into
 /// GRAPHENE_100_PERCENT units by an integer divide by 100, which turned every rate under
 /// 100 ppm into zero and switched funding off without saying so.
