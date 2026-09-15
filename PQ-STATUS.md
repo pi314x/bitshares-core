@@ -19,10 +19,22 @@ The work spans **two repositories**, which matters for anyone reviewing or build
 | `libraries/fc` (submodule) | the primitives — `fc/crypto/pqc.*`, `vendor/pqclean/`, and `fc::raw::pq_format` itself |
 
 `fc::raw::pq_format` is the mechanism every hardfork gate is built on, and it lives in the
-submodule. The submodule is therefore pinned to a branch on the fork rather than upstream,
-because the pinned commit is not reachable from `bitshares/bitshares-fc`. Both the URL and the
-pin need reverting to upstream once the fc side is merged, and **the fc side has to merge
-first** — core does not compile without it.
+submodule.
+
+**This branch does not compile as it stands, and that is deliberate.** The submodule points at
+`bitshares/bitshares-fc` and is pinned to what the hardfork branch pins, so that nothing here
+depends on a personal repository. Upstream fc contains none of the post-quantum work: no
+`fc/crypto/pqc.*`, no `vendor/pqclean/`, no `fc::pq_gated`. Thirty-three files under
+`libraries/` include those headers, so the build fails on a missing header rather than on
+anything subtle.
+
+**The fc side has to merge first.** The seven commits it needs sit on a branch of the fork,
+rebased onto upstream fc master and conflict-free; until they are upstream, the pin cannot move
+to a commit that has them, and this branch cannot be built or its tests run.
+
+Everything recorded as verified below was measured against an fc that carries those commits. It
+remains a true record of what was run, and it is not something a reviewer can reproduce from
+this branch alone today.
 
 ## The asymmetry that should drive priorities
 
@@ -171,7 +183,8 @@ run so CI stays hermetic):
   the chain database.
 - A PQ-signed transaction verifies and applies with no classical key in the authority.
 - **The vendored primitives match FIPS 203/204.** 354 known-answer checks against NIST's own
-  ACVP vectors (`libraries/fc/tests/crypto/pqc_kat/`): ML-KEM-768 keyGen, encapsulation and
+  ACVP vectors — in the fc branch that carries the primitives, not in the fc this branch
+  currently pins (`libraries/fc/tests/crypto/pqc_kat/` exists only there): ML-KEM-768 keyGen, encapsulation and
   decapsulation, and ML-DSA-65 keyGen and signature generation, all reproducing NIST's
   expected outputs byte for byte. sigGen runs in both modes -- deterministic (`rnd` = 32 zero
   bytes) and hedged (`rnd` from the vector) -- through PQClean's
