@@ -42,10 +42,6 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
 
    FC_ASSERT( HARDFORK_LIQUIDITY_POOL_PASSED(block_time), "Not allowed until the LP hardfork" );
 
-   const asset_object& asset_a_obj = op.asset_a(d); // Make sure it exists
-   const asset_object& asset_b_obj = op.asset_b(d); // Make sure it exists
-   _share_asset = &op.share_asset(d);
-
    // Before the hardfork the whole extensions field has to be absent, not merely harmless.
    // Gating on the VALUE let pool_type = constant_product through untouched, and an operation
    // carrying a set-but-default extension serialises differently from one carrying none --
@@ -56,21 +52,18 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
                  "The StableSwap extensions are not allowed until the StableSwap hardfork" );
    }
 
+   const asset_object& asset_a_obj = op.asset_a(d); // Make sure it exists
+   const asset_object& asset_b_obj = op.asset_b(d); // Make sure it exists
+   _share_asset = &op.share_asset(d);
+
    // StableSwap pools: validate the new options and the equal-precision requirement.
    const auto& opt_pool_type = op.extensions.value.pool_type;
    if( ( opt_pool_type.valid() && *opt_pool_type != static_cast<uint8_t>( liquidity_pool_curve_type::constant_product ) )
        || op.extensions.value.amplification.valid() )
    {
-      FC_ASSERT( opt_pool_type.valid()
-                 && *opt_pool_type == static_cast<uint8_t>( liquidity_pool_curve_type::stable ),
-                 "amplification can only be specified for a stable pool" );
-      FC_ASSERT( op.extensions.value.amplification.valid(),
-                 "amplification must be specified for a stable pool" );
-
-      const uint64_t amp = *op.extensions.value.amplification;
-      FC_ASSERT( amp >= STABLESWAP_AMP_MIN && amp <= STABLESWAP_AMP_MAX,
-                 "amplification must be in range [${lo}, ${hi}]",
-                 ("lo", STABLESWAP_AMP_MIN)("hi", STABLESWAP_AMP_MAX) );
+      // The shape of the options -- stable implies amplification, amplification implies
+      // stable, and the coefficient's range -- is checked in validate(). None of it depends
+      // on chain state, so none of it belongs here.
 
       // v1 keeps the on-chain integer math simple by requiring the two assets to share a
       // precision, so the raw balances are directly comparable on a 1:1 curve.
@@ -204,6 +197,12 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
 
    _pool = &op.pool(d);
 
+   // Typed to the pool's assets up front: they are added to _pool_receives_* below, and
+   // asset::operator+ asserts on a mismatched asset_id, so a default-constructed CORE zero
+   // would throw for every pool that does not happen to hold CORE.
+   _market_fee_a = asset( 0, _pool->asset_a );
+   _market_fee_b = asset( 0, _pool->asset_b );
+
    FC_ASSERT( op.amount_a.asset_id == _pool->asset_a, "Asset type A mismatch" );
    FC_ASSERT( op.amount_b.asset_id == _pool->asset_b, "Asset type B mismatch" );
 
@@ -256,13 +255,37 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
       const share_type max_new_supply =
             share_asset_obj.options.max_supply - _share_asset_dyn_data->current_supply;
 
-      const fc::uint128_t d0 = stableswap::compute_d( fc::uint128_t( _pool->balance_a.value ),
-                                                      fc::uint128_t( _pool->balance_b.value ),
-                                                      _pool->amplification );
+      // The pool already knows its invariant: update_virtual_value() runs after every balance
+      // change, so virtual_value is D for a stable pool and is never stale -- the exchange path
+      // reads it for exactly that reason. Solving it again was a Newton iteration per deposit
+      // for an answer already sitting on the object.
+      const fc::uint128_t d0 = _pool->virtual_value;
 
-      // The whole deposit is taken, not the limiting share of it.
-      const share_type new_a = _pool->balance_a + op.amount_a.amount;
-      const share_type new_b = _pool->balance_b + op.amount_b.amount;
+      // Issuer market fees, because this is where a deposit behaves like a trade.
+      //
+      // A stable pool takes the two sides in any proportion, and the imbalanced part of that
+      // is a swap: deposit one side, withdraw the other, and you have traded without ever
+      // calling exchange. The pool's own imbalance fee below already charges for that, but the
+      // asset issuer's market fee did not -- so the route around exchange was also a route
+      // around the issuer. liquidity_pool_exchange_evaluator charges it on what the pool
+      // receives, and this is the same event.
+      //
+      // Charged here and not in the two paths beside this one: an empty-pool deposit and a
+      // proportional deposit into a constant-product pool are not trades, and both predate
+      // this hardfork. Their behaviour is not changed.
+      const asset_object& asset_obj_a = _pool->asset_a(d);
+      const asset_object& asset_obj_b = _pool->asset_b(d);
+      _market_fee_a = d.calculate_market_fee( asset_obj_a, op.amount_a, true );
+      _market_fee_b = d.calculate_market_fee( asset_obj_b, op.amount_b, true );
+      FC_ASSERT( _market_fee_a <= op.amount_a && _market_fee_b <= op.amount_b,
+                 "Aborting since the market fee of a deposited asset is too high" );
+      const asset pool_gets_a = op.amount_a - _market_fee_a;
+      const asset pool_gets_b = op.amount_b - _market_fee_b;
+
+      // The whole deposit is taken, not the limiting share of it -- less what the issuer took,
+      // which never reaches the pool and so cannot count toward the shares issued for it.
+      const share_type new_a = _pool->balance_a + pool_gets_a.amount;
+      const share_type new_b = _pool->balance_b + pool_gets_b.amount;
       const fc::uint128_t d1 = stableswap::compute_d( fc::uint128_t( new_a.value ),
                                                       fc::uint128_t( new_b.value ),
                                                       _pool->amplification );
@@ -296,8 +319,12 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
       FC_ASSERT( new_supply <= fc::uint128_t( max_new_supply.value ),
                  "Would exceed the maximum supply of the share asset" );
 
-      _pool_receives_a  = op.amount_a;
-      _pool_receives_b  = op.amount_b;
+      // d1 is the invariant of the balances this deposit actually leaves behind, which is
+      // exactly what update_virtual_value() would solve for again in do_apply.
+      _new_virtual_value = d1;
+
+      _pool_receives_a  = pool_gets_a;
+      _pool_receives_b  = pool_gets_b;
       _account_receives = asset( static_cast<int64_t>( new_supply ), _pool->share_asset );
    }
    else
@@ -324,15 +351,11 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
 
    // Enforce the depositor's floor. An unbalanced deposit pays a fee that depends on the
    // pool balances at the moment of execution, and those are in the hands of whoever builds
-   // the block. As with a swap and with a withdrawal, the depositor has to be able
-   // sagen, wieviel Abweichung er hinnimmt.
+   // the block. As with a swap and with a withdrawal, the depositor has to be able to say how
+   // much of a shortfall they will accept.
    const auto& floor = op.extensions.value.min_to_receive;
    if( floor.valid() )
    {
-      // The field did not exist before StableSwap, and depositing into a constant-product
-      // pool predates it.
-      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ),
-                 "Deposit minimums are not allowed until the StableSwap hardfork" );
       FC_ASSERT( _account_receives.amount >= *floor,
                  "Deposit would mint ${g} shares but the minimum is ${m}",
                  ("g", _account_receives.amount)("m", *floor) );
@@ -347,14 +370,26 @@ generic_exchange_operation_result liquidity_pool_deposit_evaluator::do_apply(
    database& d = db();
    generic_exchange_operation_result result;
 
-   d.adjust_balance( op.account, -_pool_receives_a );
-   d.adjust_balance( op.account, -_pool_receives_b );
+   // The depositor pays what the pool gets plus what the issuer takes; the fees are zero
+   // outside the stable path, so this is unchanged for every pool that existed before.
+   d.adjust_balance( op.account, -( _pool_receives_a + _market_fee_a ) );
+   d.adjust_balance( op.account, -( _pool_receives_b + _market_fee_b ) );
    d.adjust_balance( op.account, _account_receives );
+
+   if( _market_fee_a.amount > 0 )
+      d.pay_market_fees( &_pool->share_asset(d).issuer(d), _pool->asset_a(d),
+                         _pool_receives_a + _market_fee_a, true, _market_fee_a );
+   if( _market_fee_b.amount > 0 )
+      d.pay_market_fees( &_pool->share_asset(d).issuer(d), _pool->asset_b(d),
+                         _pool_receives_b + _market_fee_b, true, _market_fee_b );
 
    d.modify( *_pool, [this]( liquidity_pool_object& lpo ){
       lpo.balance_a += _pool_receives_a.amount;
       lpo.balance_b += _pool_receives_b.amount;
-      lpo.update_virtual_value();
+      if( _new_virtual_value.valid() )
+         lpo.virtual_value = *_new_virtual_value;
+      else
+         lpo.update_virtual_value();
    });
 
    d.modify( *_share_asset_dyn_data, [this]( asset_dynamic_data_object& data ){
@@ -364,9 +399,13 @@ generic_exchange_operation_result liquidity_pool_deposit_evaluator::do_apply(
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "Internal error" );
    FC_ASSERT( _share_asset_dyn_data->current_supply > 0, "Internal error" );
 
-   result.paid.emplace_back( _pool_receives_a );
-   result.paid.emplace_back( _pool_receives_b );
+   result.paid.emplace_back( _pool_receives_a + _market_fee_a );
+   result.paid.emplace_back( _pool_receives_b + _market_fee_b );
    result.received.emplace_back( _account_receives );
+   if( _market_fee_a.amount > 0 )
+      result.fees.emplace_back( _market_fee_a );
+   if( _market_fee_b.amount > 0 )
+      result.fees.emplace_back( _market_fee_b );
 
    return result;
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -374,6 +413,9 @@ generic_exchange_operation_result liquidity_pool_deposit_evaluator::do_apply(
 void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_withdraw_operation& op)
 { try {
    const database& d = db();
+
+   // Typed to the pool's assets up front, for the same reason as on the deposit side:
+   // asset arithmetic asserts on a mismatched asset_id.
 
    // Same rule, and first for the same reason: presence of any of the three, not what they
    // say. Checking it here rather than deducing it from a later condition also means the
@@ -387,6 +429,41 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    }
 
    _pool = &op.pool(d);
+   _market_fee_a = asset( 0, _pool->asset_a );
+   _market_fee_b = asset( 0, _pool->asset_b );
+
+   // A floor on a side that a single-asset withdrawal never pays out could not be met by any
+   // outcome. That is not a weaker guarantee but one that always fails, while reading like
+   // protection, so it is refused rather than accepted.
+   //
+   // Checked here because it depends only on the operation and the pool's asset ids -- nothing
+   // that has to be computed first -- and so has no business running after compute_d().
+   const auto& one_asset_req = op.extensions.value.withdraw_one_asset;
+   if( one_asset_req.valid() )
+   {
+      if( *one_asset_req == _pool->asset_a )
+         FC_ASSERT( !op.extensions.value.min_b.valid(),
+                    "A minimum on asset B cannot be met: this withdrawal pays out only asset A" );
+      else if( *one_asset_req == _pool->asset_b )
+         FC_ASSERT( !op.extensions.value.min_a.valid(),
+                    "A minimum on asset A cannot be met: this withdrawal pays out only asset B" );
+   }
+
+   // What is left of the floors: two comparisons, run once the payouts are known. A lambda
+   // rather than a member function, because two asserts are not worth one.
+   const auto check_floors = [&]()
+   {
+      const auto& min_a = op.extensions.value.min_a;
+      const auto& min_b = op.extensions.value.min_b;
+      if( min_a.valid() )
+         FC_ASSERT( _pool_pays_a.amount >= *min_a,
+                    "Withdrawal would pay ${p} of asset A but the minimum is ${m}",
+                    ("p", _pool_pays_a.amount)("m", *min_a) );
+      if( min_b.valid() )
+         FC_ASSERT( _pool_pays_b.amount >= *min_b,
+                    "Withdrawal would pay ${p} of asset B but the minimum is ${m}",
+                    ("p", _pool_pays_b.amount)("m", *min_b) );
+   };
 
    FC_ASSERT( op.share_amount.asset_id == _pool->share_asset, "Share asset type mismatch" );
 
@@ -425,9 +502,8 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
       const share_type kept_balance  = want_a ? _pool->balance_b : _pool->balance_a;
       const share_type taken_balance = want_a ? _pool->balance_a : _pool->balance_b;
 
-      const fc::uint128_t d0 = stableswap::compute_d( fc::uint128_t( _pool->balance_a.value ),
-                                                      fc::uint128_t( _pool->balance_b.value ),
-                                                      _pool->amplification );
+      // Read, not re-solved: see the same point on the deposit path.
+      const fc::uint128_t d0 = _pool->virtual_value;
       // Burning shares shrinks the invariant in proportion.
       const fc::uint128_t supply128( _share_asset_dyn_data->current_supply.value );
       const fc::uint128_t burned( op.share_amount.amount.value );
@@ -489,7 +565,16 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
       _fee_a = asset( want_a ? charged : share_type( 0 ), _pool->asset_a );
       _fee_b = asset( want_a ? share_type( 0 ) : charged, _pool->asset_b );
 
-      check_withdrawal_floor( d, op );
+      // Issuer market fee, taker side, for the same reason the deposit path now charges one:
+      // taking a single asset out is the other half of the route around exchange. The
+      // proportional path below is not a trade and is left alone -- it predates this hardfork.
+      const asset_object& paid_asset_obj = want_a ? _pool->asset_a(d) : _pool->asset_b(d);
+      const asset& paid_asset = want_a ? _pool_pays_a : _pool_pays_b;
+      const asset mfee = d.calculate_market_fee( paid_asset_obj, paid_asset, false );
+      FC_ASSERT( mfee < paid_asset, "Aborting since the market fee of the withdrawn asset is too high" );
+      if( want_a ) _market_fee_a = mfee; else _market_fee_b = mfee;
+
+      check_floors();
 
       return void_result();
    }
@@ -521,7 +606,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
       _fee_b = asset( static_cast<int64_t>( fee_b ), _pool->asset_b );
    }
 
-   check_withdrawal_floor( d, op );
+   check_floors();
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -533,42 +618,6 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
  * a floor that only guards the proportional path would be worse than none: the single-sided
  * exit is the one that prices off the pool balances and is therefore the one worth moving.
  */
-void liquidity_pool_withdraw_evaluator::check_withdrawal_floor(
-      const database& d, const liquidity_pool_withdraw_operation& op )const
-{
-   const auto& min_a = op.extensions.value.min_a;
-   const auto& min_b = op.extensions.value.min_b;
-   if( !min_a.valid() && !min_b.valid() )
-      return;
-
-   // The fields did not exist before StableSwap. A proportional withdrawal from a
-   // constant-product pool is older than that, so unlike withdraw_one_asset these are not
-   // gated transitively by the pool type and need saying outright.
-   FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ),
-              "Withdrawal minimums are not allowed until the StableSwap hardfork" );
-
-   // A floor on the side that pays out nothing in a single-asset withdrawal could never be
-   // met. That is not a weaker guarantee but one that always fails, while reading like
-   // protection -- so refuse it rather than accept it.
-   const auto& one = op.extensions.value.withdraw_one_asset;
-   if( one.valid() )
-   {
-      FC_ASSERT( *one != _pool->asset_a || !min_b.valid(),
-                 "A minimum on asset B cannot be met: this withdrawal pays out only asset A" );
-      FC_ASSERT( *one != _pool->asset_b || !min_a.valid(),
-                 "A minimum on asset A cannot be met: this withdrawal pays out only asset B" );
-   }
-
-   if( min_a.valid() )
-      FC_ASSERT( _pool_pays_a.amount >= *min_a,
-                 "Withdrawal would pay ${p} of asset A but the minimum is ${m}",
-                 ("p", _pool_pays_a.amount)("m", *min_a) );
-   if( min_b.valid() )
-      FC_ASSERT( _pool_pays_b.amount >= *min_b,
-                 "Withdrawal would pay ${p} of asset B but the minimum is ${m}",
-                 ("p", _pool_pays_b.amount)("m", *min_b) );
-}
-
 generic_exchange_operation_result liquidity_pool_withdraw_evaluator::do_apply(
       const liquidity_pool_withdraw_operation& op)
 { try {
@@ -577,10 +626,17 @@ generic_exchange_operation_result liquidity_pool_withdraw_evaluator::do_apply(
 
    d.adjust_balance( op.account, -op.share_amount );
 
+   // The pool pays _pool_pays_*; the account receives that less the issuer's market fee,
+   // which is zero on every path that is not a single-asset withdrawal.
    if( _pool_pays_a.amount > 0 )
-      d.adjust_balance( op.account, _pool_pays_a );
+      d.adjust_balance( op.account, _pool_pays_a - _market_fee_a );
    if( _pool_pays_b.amount > 0 )
-      d.adjust_balance( op.account, _pool_pays_b );
+      d.adjust_balance( op.account, _pool_pays_b - _market_fee_b );
+
+   if( _market_fee_a.amount > 0 )
+      d.pay_market_fees( fee_paying_account, _pool->asset_a(d), _pool_pays_a, false, _market_fee_a );
+   if( _market_fee_b.amount > 0 )
+      d.pay_market_fees( fee_paying_account, _pool->asset_b(d), _pool_pays_b, false, _market_fee_b );
 
    d.modify( *_share_asset_dyn_data, [&op]( asset_dynamic_data_object& data ){
       data.current_supply -= op.share_amount.amount;

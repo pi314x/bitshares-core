@@ -46,7 +46,12 @@ void liquidity_pool_create_operation::validate()const
    FC_ASSERT( is_stable == extensions.value.amplification.valid(),
               "amplification must be specified for, and only for, a stable pool" );
    if( extensions.value.amplification.valid() )
-      FC_ASSERT( *extensions.value.amplification > 0, "amplification must be positive" );
+   {
+      const uint64_t amp = *extensions.value.amplification;
+      FC_ASSERT( amp >= STABLESWAP_AMP_MIN && amp <= STABLESWAP_AMP_MAX,
+                 "amplification must be in range [${lo}, ${hi}]",
+                 ("lo", STABLESWAP_AMP_MIN)("hi", STABLESWAP_AMP_MAX) );
+   }
 }
 
 void liquidity_pool_delete_operation::validate()const

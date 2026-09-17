@@ -31,6 +31,15 @@ namespace graphene { namespace protocol {
     * @brief The pricing curve a liquidity pool uses
     * @ingroup operations
     */
+   /// Minimum amplification coefficient A for a stable pool (A=1 is barely curved).
+   constexpr uint64_t STABLESWAP_AMP_MIN = 1;
+   /// Maximum amplification coefficient A. Bounded so that Ann*S cannot overflow 128 bits for
+   /// any int64 balances (A * n * (x+y) with x+y < 2^64 stays well under 2^128).
+   ///
+   /// Here rather than beside the curve maths, because it bounds a field of an operation and
+   /// therefore has to be checkable from validate(), which cannot see libraries/chain.
+   constexpr uint64_t STABLESWAP_AMP_MAX = 1000000;
+
    enum class liquidity_pool_curve_type : uint8_t
    {
       /// Constant-product curve x*y=k (the original, default behaviour)
@@ -143,7 +152,7 @@ namespace graphene { namespace protocol {
          fc::optional<share_type> min_to_receive;
       };
 
-      extension<ext> extensions;  ///< The depositor's floor on the pool shares issued
+      extension<ext> extensions;  ///< Extensions
 
       account_id_type fee_payer()const { return account; }
       void            validate()const;
@@ -198,12 +207,15 @@ namespace graphene { namespace protocol {
           * For a single-sided exit only the bound on the asset being withdrawn is
           * meaningful; the other side pays nothing, so a bound on it could never be met.
           * The evaluator rejects that rather than letting it look like protection.
+          *
+          * @{
           */
          fc::optional<share_type> min_a;
          fc::optional<share_type> min_b;
+         /// @}
       };
 
-      extension<ext> extensions;  ///< Single-asset withdrawal, and the withdrawer's floors
+      extension<ext> extensions;  ///< Extensions
 
       account_id_type fee_payer()const { return account; }
       void            validate()const;

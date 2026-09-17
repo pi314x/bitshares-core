@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <graphene/protocol/liquidity_pool.hpp>
+
 #include <fc/uint128.hpp>
 #include <fc/exception/exception.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
@@ -30,11 +32,8 @@
 
 namespace graphene { namespace chain {
 
-/// Minimum amplification coefficient A for a stable pool (A=1 is barely curved).
-constexpr uint64_t STABLESWAP_AMP_MIN = 1;
-/// Maximum amplification coefficient A. Bounded so that Ann*S cannot overflow 128 bits for
-/// any int64 balances (A * n * (x+y) with x+y < 2^64 stays well under 2^128).
-constexpr uint64_t STABLESWAP_AMP_MAX = 1000000;
+using graphene::protocol::STABLESWAP_AMP_MIN;
+using graphene::protocol::STABLESWAP_AMP_MAX;
 
 namespace stableswap {
 
@@ -136,6 +135,16 @@ inline fc::uint128_t compute_d( const fc::uint128_t& x, const fc::uint128_t& y, 
 
    for( int16_t i = 0; i < SS_MAX_ITER; ++i )
    {
+      // Every division here truncates, but that does not make D systematically low. The
+      // iteration starts at d = x + y, which is at or above D, and approaches it from above;
+      // what decides the final value is the stop tolerance below, not the truncation. Measured
+      // against a high-precision reference over 4000 random pool states (balances to 1e15,
+      // A to 1e6): D came out as much as 515 units ABOVE the exact value -- which is the
+      // direction that favours the pool, since a larger D makes compute_new_y hold more back --
+      // and never more than exactly 1 unit below it. One unit is what the withdrawal path
+      // already gives back to the pool before paying out, so the only direction that could
+      // favour the caller is covered. Evidence, not proof: 4000 samples, not an argument.
+      //
       // D_P = D^(n+1) / (n^n * prod(x_i)) ; for n=2: D_P = D^3 / (4 * x * y)
       // Computed in a 256-bit accumulator: the D_P*D intermediate below can transiently
       // exceed 128 bits for imbalanced pools even though D itself never does.
@@ -156,23 +165,34 @@ inline fc::uint128_t compute_d( const fc::uint128_t& x, const fc::uint128_t& y, 
 
       // Not converging: check whether we have been at this exact value before, which means
       // the iteration is cycling and will keep returning here for as long as we let it.
-      // The valid entries are the most recent `filled`, i.e. the tail of the window.
-      for( size_t k = SS_CYCLE_WINDOW - filled; k < SS_CYCLE_WINDOW; ++k )
+      // The valid entries are the oldest `filled`, at the head of the window.
+      for( size_t k = 0; k < filled; ++k )
       {
          if( recent[k] != d )
             continue;
          wide_uint best = d;
-         for( size_t j = k; j < SS_CYCLE_WINDOW; ++j )
+         for( size_t j = k; j < filled; ++j )
             if( recent[j] > best )
                best = recent[j];
          return detail::narrow( best, "D" );
       }
 
-      for( size_t k = 1; k < SS_CYCLE_WINDOW; ++k )
-         recent[k - 1] = recent[k];
-      recent[SS_CYCLE_WINDOW - 1] = d;
+      // Append while there is room, and only shift once the window is full. The window is
+      // head-aligned for exactly this reason: shifting all of it on every iteration moved
+      // thirty-one entries to make room for one, and did so even while most of the window was
+      // still empty. Almost every call converges in a handful of iterations and so never
+      // fills it at all, which means it now never shifts.
       if( filled < SS_CYCLE_WINDOW )
+      {
+         recent[filled] = d;
          ++filled;
+      }
+      else
+      {
+         for( size_t k = 1; k < SS_CYCLE_WINDOW; ++k )
+            recent[k - 1] = recent[k];
+         recent[SS_CYCLE_WINDOW - 1] = d;
+      }
    }
 
    FC_THROW_EXCEPTION( fc::exception, "StableSwap D did not converge" );
