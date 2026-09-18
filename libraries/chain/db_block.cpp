@@ -777,13 +777,19 @@ processed_transaction database::_apply_transaction(const signed_transaction& trx
 
    trx.validate();
 
-   // PQ consensus gate: reject pq_signatures before activation
-   if( 0 == (skip & skip_transaction_signatures) )
-   {
-      if( !pq_active )
-         FC_ASSERT( trx.pq_signatures.empty(),
-                    "Post-quantum signatures are not yet active" );
-   }
+   // PQ consensus gate: reject pq_signatures before activation.
+   //
+   // Outside the signature-check skip on purpose. Whether the field may be present at all is a
+   // structural rule about the transaction, in the same category as validate() above it, not a
+   // question of whether a signature is good -- and skip_transaction_signatures is set by nodes
+   // that trust the producer, which is exactly when a structural rule still has to hold.
+   //
+   // It cannot be reached from the network in any case: pq_gated emits nothing at all under the
+   // legacy format, not even a length prefix, so a transaction unpacked before activation has
+   // no such field to carry. What this catches is a transaction built in process.
+   if( !pq_active )
+      FC_ASSERT( trx.pq_signatures.empty(),
+                 "Post-quantum signatures are not yet active" );
 
    auto& trx_idx = get_mutable_index_type<transaction_index>();
    const chain_id_type& chain_id = get_chain_id();
