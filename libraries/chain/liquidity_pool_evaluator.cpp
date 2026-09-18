@@ -414,9 +414,6 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 { try {
    const database& d = db();
 
-   // Typed to the pool's assets up front, for the same reason as on the deposit side:
-   // asset arithmetic asserts on a mismatched asset_id.
-
    // Same rule, and first for the same reason: presence of any of the three, not what they
    // say. Checking it here rather than deducing it from a later condition also means the
    // cheap test runs before anything is computed.
@@ -429,6 +426,10 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    }
 
    _pool = &op.pool(d);
+
+   // Typed to the pool's assets, for the same reason as on the deposit side: asset arithmetic
+   // asserts on a mismatched asset_id, so a default-constructed CORE zero would throw for
+   // every pool that does not hold CORE.
    _market_fee_a = asset( 0, _pool->asset_a );
    _market_fee_b = asset( 0, _pool->asset_b );
 
@@ -438,13 +439,13 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    //
    // Checked here because it depends only on the operation and the pool's asset ids -- nothing
    // that has to be computed first -- and so has no business running after compute_d().
-   const auto& one_asset_req = op.extensions.value.withdraw_one_asset;
-   if( one_asset_req.valid() )
+   const auto& one_asset = op.extensions.value.withdraw_one_asset;
+   if( one_asset.valid() )
    {
-      if( *one_asset_req == _pool->asset_a )
+      if( *one_asset == _pool->asset_a )
          FC_ASSERT( !op.extensions.value.min_b.valid(),
                     "A minimum on asset B cannot be met: this withdrawal pays out only asset A" );
-      else if( *one_asset_req == _pool->asset_b )
+      else if( *one_asset == _pool->asset_b )
          FC_ASSERT( !op.extensions.value.min_a.valid(),
                     "A minimum on asset A cannot be met: this withdrawal pays out only asset B" );
    }
@@ -453,16 +454,22 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    // rather than a member function, because two asserts are not worth one.
    const auto check_floors = [&]()
    {
+      // Against what the account actually receives, which is what the pool pays less the
+      // issuer's market fee. Comparing the floor with the gross would let a withdrawal satisfy
+      // a minimum and still hand over less than it -- the fee is deducted after this point,
+      // so the guarantee has to be stated in the same terms the withdrawer gets paid in.
       const auto& min_a = op.extensions.value.min_a;
       const auto& min_b = op.extensions.value.min_b;
+      const share_type receives_a = _pool_pays_a.amount - _market_fee_a.amount;
+      const share_type receives_b = _pool_pays_b.amount - _market_fee_b.amount;
       if( min_a.valid() )
-         FC_ASSERT( _pool_pays_a.amount >= *min_a,
+         FC_ASSERT( receives_a >= *min_a,
                     "Withdrawal would pay ${p} of asset A but the minimum is ${m}",
-                    ("p", _pool_pays_a.amount)("m", *min_a) );
+                    ("p", receives_a)("m", *min_a) );
       if( min_b.valid() )
-         FC_ASSERT( _pool_pays_b.amount >= *min_b,
+         FC_ASSERT( receives_b >= *min_b,
                     "Withdrawal would pay ${p} of asset B but the minimum is ${m}",
-                    ("p", _pool_pays_b.amount)("m", *min_b) );
+                    ("p", receives_b)("m", *min_b) );
    };
 
    FC_ASSERT( op.share_amount.asset_id == _pool->share_asset, "Share asset type mismatch" );
@@ -483,7 +490,6 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    FC_ASSERT( _share_asset_dyn_data->current_supply >= op.share_amount.amount,
               "Can not withdraw an amount that is more than the current supply" );
 
-   const auto& one_asset = op.extensions.value.withdraw_one_asset;
    if( one_asset.valid() )
    {
       // --- single-sided exit ------------------------------------------------------------
@@ -611,13 +617,6 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
-/**
- * Enforce the caller's floor on what the withdrawal pays out.
- *
- * Called from both exits of do_evaluate -- the single-sided branch returns early -- because
- * a floor that only guards the proportional path would be worse than none: the single-sided
- * exit is the one that prices off the pool balances and is therefore the one worth moving.
- */
 generic_exchange_operation_result liquidity_pool_withdraw_evaluator::do_apply(
       const liquidity_pool_withdraw_operation& op)
 { try {

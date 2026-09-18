@@ -27,19 +27,21 @@
 
 namespace graphene { namespace protocol {
 
+   /// Bounds on the amplification coefficient A of a stable pool. Here rather than beside the
+   /// curve maths, because they bound a field of an operation and therefore have to be
+   /// checkable from validate(), which cannot see libraries/chain.
+   /// @{
+   /// A = 1 is barely curved.
+   constexpr uint64_t STABLESWAP_AMP_MIN = 1;
+   /// Bounded so that Ann*S cannot overflow 128 bits for any int64 balances (A * n * (x+y)
+   /// with x+y < 2^64 stays well under 2^128).
+   constexpr uint64_t STABLESWAP_AMP_MAX = 1000000;
+   /// @}
+
    /**
     * @brief The pricing curve a liquidity pool uses
     * @ingroup operations
     */
-   /// Minimum amplification coefficient A for a stable pool (A=1 is barely curved).
-   constexpr uint64_t STABLESWAP_AMP_MIN = 1;
-   /// Maximum amplification coefficient A. Bounded so that Ann*S cannot overflow 128 bits for
-   /// any int64 balances (A * n * (x+y) with x+y < 2^64 stays well under 2^128).
-   ///
-   /// Here rather than beside the curve maths, because it bounds a field of an operation and
-   /// therefore has to be checkable from validate(), which cannot see libraries/chain.
-   constexpr uint64_t STABLESWAP_AMP_MAX = 1000000;
-
    enum class liquidity_pool_curve_type : uint8_t
    {
       /// Constant-product curve x*y=k (the original, default behaviour)

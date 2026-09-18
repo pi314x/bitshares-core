@@ -86,8 +86,8 @@ void liquidity_pool_withdraw_operation::validate()const
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
    FC_ASSERT( share_amount.amount > 0, "Amount of the share asset should be positive" );
 
-   // Welcher Seite eine Untergrenze gilt, entscheidet erst der Evaluator: hier ist der Pool
-   // nicht bekannt, also auch nicht, welches seiner beiden Assets withdraw_one_asset nennt.
+   // Which side a floor applies to is for the evaluator to decide: the pool is not known here,
+   // and so neither is which of its two assets withdraw_one_asset names.
    const auto& min_a = extensions.value.min_a;
    const auto& min_b = extensions.value.min_b;
    if( min_a.valid() )
