@@ -689,6 +689,12 @@ namespace graphene { namespace wallet { namespace detail {
       flat_set<pq_public_key_type> all_keys_for_account;
       for( const auto& k : account.active.get_pq_keys() ) all_keys_for_account.insert( k );
       for( const auto& k : account.owner.get_pq_keys() ) all_keys_for_account.insert( k );
+      // The memo key belongs to the account as much as the authority keys do, and import_key()
+      // counts the classical one for exactly this reason. Without it, importing the key that
+      // reads the account's own post-quantum memos was reported back as a key belonging to
+      // somebody else.
+      if( account.options.pq_memo_key.value.valid() )
+         all_keys_for_account.insert( *account.options.pq_memo_key.value );
 
       _pq_keys[wif_pub_key] = base58_key;
 
